@@ -15,3 +15,16 @@ you cannot buy if the stock is above the s&p500 and you cannot sell if the stock
 make sure to only have one buy while below the s&p500 and one sell while above the s&p500
 
 make sure to have a buy signal before the next sell signal and a sell signal before the next buy signal
+
+
+
+the notorious biggie riggy - buying and selling based on percentage increase and decrease over week.
+
+if the stock goes down 5% in a week monday to monday, buy $5
+if the stock goes up 10% in a week monday to monday, sell $10
+if the stock goes down 5% in a month 1st to 1st, buy $5
+if the stock goes up 10% in a month 1st to 1st, sell $10
+
+I want the week long signals to be tied together, and the month signals to be tied, for example don't make a sell-month signal if there is no buy-month signal right before it
+
+now i want to have streaming data handling, instead of hard-coded monday to monday and 15-15, simply take the past 7 days, the past 15 day, and the past 30 days

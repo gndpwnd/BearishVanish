@@ -16,7 +16,7 @@ api_key = os.getenv('ALPACA_API_KEY')
 secret_key = os.getenv('ALPACA_SECRET_KEY')
 data_client = StockHistoricalDataClient(api_key, secret_key)
 
-HISTORY = 30
+HISTORY = 90
 end_date = datetime.now()
 start_date = end_date - timedelta(days=HISTORY)
 
@@ -59,6 +59,48 @@ def detect_crosses(stock_cum, sp500_cum):
             crosses.append(i)
     return crosses
 
+def intersection_algorithm(stock_cum, sp500_cum):
+    stock_slope = np.gradient(stock_cum)
+    crosses = detect_crosses(stock_cum, sp500_cum)
+
+    last_cross_index = -1
+    last_cross_was_below = None
+    signals = []
+    last_signal = None  # Ensure alternating signals
+
+    for i in range(2, len(stock_cum)):
+        prev_slope = stock_slope[i - 2]
+        curr_slope = stock_slope[i]
+
+        # Track crossovers
+        if i in crosses:
+            last_cross_index = i
+            last_cross_was_below = stock_cum.iloc[i] < sp500_cum.iloc[i]
+
+        # BUY signal
+        if (
+            last_cross_index != -1 and
+            last_cross_was_below and
+            prev_slope < 0 and curr_slope > 0 and
+            stock_cum.iloc[i] < sp500_cum.iloc[i] and
+            last_signal != 'BUY'
+        ):
+            signals.append(('BUY', i))
+            last_signal = 'BUY'
+
+        # SELL signal
+        elif (
+            last_cross_index != -1 and
+            not last_cross_was_below and
+            prev_slope > 0 and curr_slope < 0 and
+            stock_cum.iloc[i] > sp500_cum.iloc[i] and
+            last_signal != 'SELL'
+        ):
+            signals.append(('SELL', i))
+            last_signal = 'SELL'
+
+    return signals
+
 def update_plot(symbol):
     global current_symbol
     current_symbol = symbol.upper()
@@ -79,46 +121,10 @@ def update_plot(symbol):
     sp500_cum = np.cumsum(sp500_returns) * 100
     dates = stock_data.index
 
-    stock_slope = np.gradient(stock_cum)
-    crosses = detect_crosses(stock_cum, sp500_cum)
+    # Get buy/sell signals using the encapsulated logic
+    signals = intersection_algorithm(stock_cum, sp500_cum)
 
-    last_cross_index = -1
-    last_cross_was_below = None
-    signals = []
-    last_signal = None  # Track last signal to enforce alternation
-
-    for i in range(2, len(stock_cum)):
-        prev_slope = stock_slope[i - 2]
-        curr_slope = stock_slope[i]
-
-        # Detect cross
-        if i in crosses:
-            last_cross_index = i
-            last_cross_was_below = stock_cum.iloc[i] < sp500_cum.iloc[i]
-
-        # Buy logic (must have crossed below and last signal was not BUY)
-        if (
-            last_cross_index != -1 and
-            last_cross_was_below and
-            prev_slope < 0 and curr_slope > 0 and
-            stock_cum.iloc[i] < sp500_cum.iloc[i] and
-            last_signal != 'BUY'
-        ):
-            signals.append(('BUY', i))
-            last_signal = 'BUY'
-
-        # Sell logic (must have crossed above and last signal was not SELL)
-        elif (
-            last_cross_index != -1 and
-            not last_cross_was_below and
-            prev_slope > 0 and curr_slope < 0 and
-            stock_cum.iloc[i] > sp500_cum.iloc[i] and
-            last_signal != 'SELL'
-        ):
-            signals.append(('SELL', i))
-            last_signal = 'SELL'
-
-    # Plotting cumulative returns
+    # Plot cumulative returns
     ax1.plot(dates, stock_cum, label=f'{current_symbol} Cumulative Returns')
     ax1.plot(dates, sp500_cum, label='S&P 500 Cumulative Returns')
 
@@ -135,7 +141,7 @@ def update_plot(symbol):
     plt.xticks(rotation=45)
     ax1.legend()
 
-    # Plotting prices
+    # Plot price chart with signals
     ax2.plot(dates, stock_data['close'], label=f'{current_symbol} Price', color='blue')
     for signal, idx in signals:
         color = 'green' if signal == 'BUY' else 'red'
