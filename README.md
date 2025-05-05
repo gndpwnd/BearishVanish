@@ -45,6 +45,13 @@ delete what would be deleted, except for venv/
 git clean -xdf -e venv/
 ```
 
+Need to install tkinter for interactive plotting
+
+```bash
+sudo apt-get update
+sudo apt-get install python3-tk
+```
+
 ---
 
 # Trading Methodologies
