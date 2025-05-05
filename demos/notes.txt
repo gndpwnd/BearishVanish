@@ -1,4 +1,4 @@
-intersectorside
+intersectorside - buying and selling based on slope reversal after crossing the S&P 500
 
 basically find when the slope of the cumulative return percentage of the stock reverse direction
 
@@ -8,6 +8,10 @@ if it starts going down and it previously cross the s&P 500 while the slope of t
 
 and then only buy once until it crosses the s&P again, and then only sell once until it crosses the s&p again
 
-i don't want just one buy and one sell total, i want one buy as in the first buy after it dips below the s&P and then one sell as in the first sell after it climbs across the s&p
+i don't want just one buy and one sell total, i want one buy charted per cross as in the first buy after it dips below the s&P and then one sell charted per cross as in the first sell after it climbs across the s&p
 
-the buys sell signals just don't update continuously to handle a new graph
+you cannot buy if the stock is above the s&p500 and you cannot sell if the stock is below the s&p500
+
+make sure to only have one buy while below the s&p500 and one sell while above the s&p500
+
+make sure to have a buy signal before the next sell signal and a sell signal before the next buy signal
