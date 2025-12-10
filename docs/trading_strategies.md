@@ -1,4 +1,4 @@
-intersectorside - buying and selling based on slope reversal after crossing the S&P 500
+strategy #1 - buying and selling based on slope reversal after crossing the S&P 500
 
 basically find when the slope of the cumulative return percentage of the stock reverse direction
 
@@ -18,7 +18,7 @@ make sure to have a buy signal before the next sell signal and a sell signal bef
 
 
 
-the notorious biggie riggy - buying and selling based on percentage increase and decrease over week.
+strategy #2 - buying and selling based on percentage increase and decrease over week.
 
 if the stock goes down 5% in a week monday to monday, buy $5
 if the stock goes up 10% in a week monday to monday, sell $10
