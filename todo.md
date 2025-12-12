@@ -5,6 +5,7 @@
     - maybe make "profit/loss by stock" a heatmap with averages so can more clearly see if more profits than losses
     - maybe show s&p 500 charted with the "portfolio value over time" chart for a quick comparison...
 - need to figure out why loading data is so slow, change to a different database? is the disk the limiting factor? are there not actually multiple workers running when checking if data exists?
+
 - maybe a new strategy: staying ahead of the index
     - sp500 intersection -> russel 3000 intersection, try to skim the tops of the indexes?
 - need to figure out why weekly threshold strategy is so low compared to s&p - need more stocks?
@@ -14,6 +15,19 @@
 
 - don't think i need the automated testing script anymore... maybe a simple bash script for configuring number of days of history, making sure everything is downloaded, then testing with specific parameters
 - need to make sure that simulation is able to configure amount of backtesting history and startup capital based on user input 
+
+- try to figure out how to minimize losses in current strategies while maximizing profits
+
+- need to "trickle market data" when getting "to many requests" so can run overnight and get more market data.
+    - need to have a background process constantly updating known universes and all stock information for configured number of days regardless if the user wants to update them or not so don't get rate limited...
+    - want to be able to run this universe trickle individually as well with a default of 180 past days from current day, so can run overnight then run simulations in the morning. would be very useful
+
+- then also fix these errors:
+
+❌ Error generating markdown: 'StrategyTracker' object has no attribute 'get_portfolio_beta'
+
+❌ Error saving report: 'StrategyTracker' object has no attribute 'get_portfolio_beta'
+
 
 - just log errors or warnings to a logfile with a timestamp, tired of excessive terminal output, just have a counter that doesn't reprint to the terminal when increments for various things like the following:
 
