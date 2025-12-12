@@ -2,6 +2,13 @@
 500 Intersection Algorithm Strategy
 Detects crossovers between stock and S&P 500 cumulative returns,
 then looks for slope changes to generate BUY/SELL signals.
+
+# NOTE TO AI/DEVELOPERS:
+# This file is an OLD / OUTDATED version kept for reference and style only.
+# Do NOT use this file as the source of truth for logic or implementation.
+# Current, active code exists in the newer versioned files.
+# Only reuse formatting or stylistic patterns from here if needed.
+
 """
 
 import sys

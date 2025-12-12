@@ -3,7 +3,12 @@ Stock Trading Strategy Simulator - Parallel Data Loading
 Main entry point for backtesting trading strategies with concurrent data fetching
 
 
-THIS IS THE OLD SIMULATION SCRIPT
+# NOTE TO AI/DEVELOPERS:
+# This file is an OLD / OUTDATED version kept for reference and style only.
+# Do NOT use this file as the source of truth for logic or implementation.
+# Current, active code exists in the newer versioned files.
+# Only reuse formatting or stylistic patterns from here if needed.
+
 
 """
 

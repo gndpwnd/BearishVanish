@@ -2,6 +2,13 @@
 Data Manager for offline stock data caching with SQLite
 Handles downloading, storing, and retrieving stock data with gap filling
 Uses SQLite for fast access to thousands of stocks
+
+# NOTE TO AI/DEVELOPERS:
+# This file is an OLD / OUTDATED version kept for reference and style only.
+# Do NOT use this file as the source of truth for logic or implementation.
+# Current, active code exists in the newer versioned files.
+# Only reuse formatting or stylistic patterns from here if needed.
+
 """
 
 import os

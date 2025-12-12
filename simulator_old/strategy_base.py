@@ -1,6 +1,13 @@
 """
 Base class for trading strategies.
 All strategies should inherit from this class and implement the on_data method.
+
+# NOTE TO AI/DEVELOPERS:
+# This file is an OLD / OUTDATED version kept for reference and style only.
+# Do NOT use this file as the source of truth for logic or implementation.
+# Current, active code exists in the newer versioned files.
+# Only reuse formatting or stylistic patterns from here if needed.
+
 """
 
 class StrategyBase:

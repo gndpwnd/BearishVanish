@@ -2,7 +2,11 @@
 Stock Trading Strategy Simulator - With Universe Management and System Benchmarking
 Main entry point for backtesting trading strategies with automatic position liquidation
 
-THIS IS THE NEW SIMULATOR SCRIPT
+KEY CHANGES FROM ORIGINAL:
+1. max_positions increased from 5 to 10 (line ~735)
+2. End-of-simulation liquidation added (line ~900)
+3. force_liquidate_all() method support added
+4. Optional liquidation and universe checking flags added
 """
 
 import os
@@ -66,6 +70,12 @@ parser.add_argument('--cleanup-db', action='store_true', help='Clean up database
 # Benchmark arguments
 parser.add_argument('--benchmark', action='store_true', help='Run system benchmark and recommend worker counts')
 parser.add_argument('--show-benchmark', action='store_true', help='Show saved benchmark results')
+
+# NEW: Strategy testing arguments
+parser.add_argument('--force-liquidate', action='store_true', 
+                   help='Force liquidation of all positions at end of simulation')
+parser.add_argument('--no-universe-check', action='store_true',
+                   help='Disable universe checking during simulation (no forced exits for delisted stocks)')
 
 args = parser.parse_args()
 
@@ -272,7 +282,7 @@ if args.cache_status:
     sys.exit(0)
 
 # ============================================================
-# DOWNLOAD COMMAND (MOVED BEFORE SYMBOL SELECTION)
+# DOWNLOAD COMMAND
 # ============================================================
 
 if args.download:
@@ -282,13 +292,11 @@ if args.download:
     
     # Determine which symbols to download
     if args.tickers:
-        # Download specific tickers
         symbols_to_download = [t.strip().upper() for t in args.tickers.split(',')]
         print(f"📦 Downloading specific tickers: {', '.join(symbols_to_download)}")
         
     elif args.universe:
         if args.universe == 'all':
-            # Download ALL universes
             print("📦 Downloading data for ALL universes...")
             
             all_symbols = set()
@@ -301,7 +309,6 @@ if args.download:
             print(f"\n📊 Total unique stocks: {len(all_symbols)}")
             
         else:
-            # Download specific universe
             symbols_to_download = universe_manager.get_approved_tickers(args.universe)
             if not symbols_to_download:
                 print(f"❌ No symbols found for universe: {args.universe}")
@@ -311,13 +318,12 @@ if args.download:
             symbols_to_download = symbols_to_download + ['SPY']
             print(f"📦 Downloading data for {args.universe}: {len(symbols_to_download)-1} stocks")
     else:
-        # No universe specified, use default symbols
         symbols_to_download = ['AAPL', 'GOOGL', 'TSLA', 'MSFT', 'NVDA', 'META', 'SPY']
         print(f"📦 Downloading data for default stocks")
     
     print(f"🔧 Using {args.download_workers} parallel workers (from benchmark)\n")
     
-    # Parallel download with recommended workers
+    # Parallel download
     def download_symbol(symbol):
         try:
             df = data_manager.get_stock_data(symbol, days=HISTORY)
@@ -336,7 +342,7 @@ if args.download:
         
         for future in as_completed(futures):
             symbol, df, error = future.result()
-            if error or df is None:  # ← FIXED: Check for None
+            if error or df is None:
                 error_msg = error if error else "No data returned"
                 print(f"❌ {symbol}: Error - {error_msg}")
                 results[symbol] = None
@@ -355,11 +361,10 @@ if args.download:
     sys.exit(0)
 
 # ============================================================
-# SYMBOL SELECTION: From Universe or Hardcoded
+# SYMBOL SELECTION
 # ============================================================
 
 if args.universe:
-    # Load symbols from universe
     print(f"\n{'='*70}")
     print(f"LOADING SYMBOLS FROM {args.universe.upper()} UNIVERSE")
     print(f"{'='*70}")
@@ -375,16 +380,8 @@ if args.universe:
     print(f"   Sample: {SYMBOLS[:10]}")
     print(f"{'='*70}\n")
 else:
-    # Use hardcoded symbols (original behavior)
     SYMBOLS = ['AAPL', 'GOOGL', 'TSLA', 'MSFT', 'NVDA', 'META']
     print(f"\nUsing default symbols: {SYMBOLS}")
-    if len(SYMBOLS) > 100:
-        print(f"⚠️  Warning: Trading {len(SYMBOLS)} symbols - simulation may be slow")
-        print(f"   Consider using fewer stocks or specific strategies")
-
-# ============================================================
-# OFFLINE MODE BANNER
-# ============================================================
 
 if args.offline:
     print("\n" + "="*70)
@@ -414,7 +411,6 @@ def load_strategies():
     
     for idx, strategy_file in enumerate(strategy_files):
         try:
-            # Use unique module name to avoid conflicts
             module_name = f"strategy_module_{idx}_{strategy_file.stem}"
             spec = importlib.util.spec_from_file_location(module_name, strategy_file)
             module = importlib.util.module_from_spec(spec)
@@ -425,7 +421,6 @@ def load_strategies():
                 color = strategy_colors[idx % len(strategy_colors)]
                 strategy_instance = module.Strategy(color=color)
                 
-                # Override name with filename if not custom set
                 filename_name = strategy_file.stem.replace('strategy_', '').replace('_', ' ').title()
                 if not hasattr(strategy_instance, 'name') or strategy_instance.name == "Strategy":
                     strategy_instance.name = filename_name
@@ -436,7 +431,7 @@ def load_strategies():
             print(f"Error loading {strategy_file}: {e}")
 
 # ============================================================
-# DATA FETCHING (with parallel support and auto-tuned workers)
+# DATA FETCHING
 # ============================================================
 
 def fetch_stock_data(symbol, days=HISTORY):
@@ -465,7 +460,6 @@ def fetch_stock_data_parallel(symbols, days=HISTORY, max_workers=None):
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='DataLoader') as executor:
         futures = {executor.submit(load_symbol, sym): sym for sym in symbols}
         
-        # Progress bar with tqdm
         with tqdm(total=len(symbols), desc="Loading data", unit="stock") as pbar:
             for future in as_completed(futures):
                 symbol, df, error = future.result()
@@ -479,7 +473,6 @@ def fetch_stock_data_parallel(symbols, days=HISTORY, max_workers=None):
                 
                 pbar.update(1)
     
-    # Summary
     if errors:
         print(f"\n⚠️  {len(errors)} symbols failed to load")
         print(f"✅ Continuing with {len(stock_data_dict)}/{len(symbols)} symbols\n")
@@ -489,16 +482,11 @@ def fetch_stock_data_parallel(symbols, days=HISTORY, max_workers=None):
     return stock_data_dict
 
 # ============================================================
-# FORCED LIQUIDATION FUNCTION (The "Override/Dump" Feature)
+# FORCED LIQUIDATION FUNCTION
 # ============================================================
 
 def check_and_liquidate_invalid_positions(current_date, strategy_trackers, approved_tickers, current_prices):
-    """
-    Check all positions against approved universe
-    Force liquidate any positions not in approved list
-    
-    This is the OVERRIDE function that automatically sells delisted stocks
-    """
+    """Check and force liquidate positions not in approved universe"""
     forced_exits = []
     
     for strategy_name, tracker in strategy_trackers.items():
@@ -506,11 +494,9 @@ def check_and_liquidate_invalid_positions(current_date, strategy_trackers, appro
             shares = tracker.positions.get(symbol, 0)
             
             if shares > 0 and symbol not in approved_tickers:
-                # FORCE SELL - Stock removed from universe
                 print(f"\n⚠️  OVERRIDE: {symbol} not in approved universe")
                 print(f"   → Forcing liquidation for {strategy_name}")
                 
-                # Execute forced sell
                 if symbol in current_prices:
                     price = current_prices[symbol]
                     tracker.execute_trade(
@@ -520,7 +506,6 @@ def check_and_liquidate_invalid_positions(current_date, strategy_trackers, appro
                         date=current_date
                     )
                     
-                    # Mark as forced exit in trades list
                     if tracker.trades:
                         tracker.trades[-1]['forced_exit'] = True
                         tracker.trades[-1]['reason'] = 'DELISTED_FROM_UNIVERSE'
@@ -542,35 +527,6 @@ def check_and_liquidate_invalid_positions(current_date, strategy_trackers, appro
     return forced_exits
 
 # ============================================================
-# HELPER FUNCTION TO TRACK TRADE EXECUTION
-# ============================================================
-
-def track_trade_execution(tracker, strategy, symbol, signal, price, date):
-    """
-    Helper to execute trade and track if it succeeded
-    
-    Returns:
-        bool: True if trade executed, False if blocked
-    """
-    trades_before = tracker.get_num_trades()
-    cash_before = tracker.cash
-    
-    # Attempt execution
-    success = tracker.execute_trade(symbol, signal, price, date)
-    
-    # Check if it actually executed
-    trades_after = tracker.get_num_trades()
-    cash_after = tracker.cash
-    
-    if success:
-        # Success! Record in strategy
-        strategy.record_execution(signal, symbol)
-        return True
-    else:
-        # Failed (insufficient cash, position limits, etc.)
-        return False
-
-# ============================================================
 # MAIN SIMULATION FUNCTION
 # ============================================================
 
@@ -580,7 +536,7 @@ def run_simulation():
     is_running = True
     results = {}
     
-    # Load SPY first (needed for alignment)
+    # Load SPY first
     print("Loading data...")
     try:
         spy_data = fetch_stock_data("SPY")
@@ -597,77 +553,6 @@ def run_simulation():
         is_running = False
         return
     
-    # ============================================================
-    # COMPREHENSIVE DEBUG: Strategy Signal Analysis
-    # ============================================================
-    
-    print(f"\n🔍 DEBUG: Comprehensive Strategy Signal Analysis...")
-    
-    for strategy in strategies:
-        print(f"\n{'='*70}")
-        print(f"Strategy: {strategy.name}")
-        print(f"{'='*70}")
-        
-        # Check across ALL bars, not just first 50
-        signal_summary = {
-            'total_checked': 0,
-            'signals_generated': 0,
-            'buy_signals': 0,
-            'sell_signals': 0,
-            'stocks_with_signals': set()
-        }
-        
-        # Sample 50 stocks across the full date range
-        sample_stocks = list(stock_data_dict.keys())[:50]
-        
-        for symbol in sample_stocks:
-            stock_bar = stock_data_dict[symbol]
-            spy_bar = spy_data
-            
-            # Check every 10th bar to avoid slowdown
-            for bar_idx in range(0, len(spy_bar), 10):
-                signal_summary['total_checked'] += 1
-                
-                if bar_idx < len(stock_bar):
-                    test_bar = stock_bar.iloc[:bar_idx+1]
-                    test_spy = spy_bar.iloc[:bar_idx+1]
-                    test_date = spy_bar.index[bar_idx]
-                    
-                    signal = strategy.on_data(test_bar, test_spy, test_date, symbol)
-                    
-                    if signal:
-                        signal_summary['signals_generated'] += 1
-                        signal_summary['stocks_with_signals'].add(symbol)
-                        
-                        if signal == 'BUY':
-                            signal_summary['buy_signals'] += 1
-                        elif signal == 'SELL':
-                            signal_summary['sell_signals'] += 1
-        
-        print(f"\nSignal Generation Analysis:")
-        print(f"  Bars checked: {signal_summary['total_checked']}")
-        print(f"  Signals generated: {signal_summary['signals_generated']}")
-        print(f"  BUY signals: {signal_summary['buy_signals']}")
-        print(f"  SELL signals: {signal_summary['sell_signals']}")
-        print(f"  Stocks with signals: {len(signal_summary['stocks_with_signals'])}/50")
-        print(f"  Signal frequency: {(signal_summary['signals_generated']/signal_summary['total_checked']*100) if signal_summary['total_checked'] > 0 else 0:.2f}%")
-        
-        if signal_summary['signals_generated'] == 0:
-            print(f"\n  ⚠️  WARNING: No signals generated!")
-            print(f"  Strategy conditions might be too strict")
-            print(f"  Check your strategy logic in {strategy.name}")
-        elif signal_summary['signals_generated'] < 10:
-            print(f"\n  ⚠️  WARNING: Very few signals ({signal_summary['signals_generated']})")
-            print(f"  Strategy is too conservative for {len(SYMBOLS)} stocks")
-        
-        # Show which stocks generate signals
-        if signal_summary['stocks_with_signals']:
-            print(f"\n  Stocks generating signals:")
-            for sym in list(signal_summary['stocks_with_signals'])[:10]:
-                print(f"    • {sym}")
-            if len(signal_summary['stocks_with_signals']) > 10:
-                print(f"    ... and {len(signal_summary['stocks_with_signals']) - 10} more")
-    
     # Align all data to common dates
     common_dates = spy_data.index
     for symbol in list(stock_data_dict.keys()):
@@ -682,11 +567,18 @@ def run_simulation():
     total_bars = len(common_dates)
     delay = TOTAL_DURATION / total_bars if total_bars > 0 else 0.01
     
-    # Initialize trackers for each strategy
+    # ============================================================
+    # CHANGE 1: Increase max_positions from 5 to 10
+    # ============================================================
     strategy_trackers = {}
     for strategy in strategies:
         strategy.reset()
-        strategy_trackers[strategy.name] = StrategyTracker(strategy.name, INITIAL_CASH)
+        strategy_trackers[strategy.name] = StrategyTracker(
+            strategy.name, 
+            INITIAL_CASH,
+            position_size_pct=0.20,
+            max_positions=10  # ← INCREASED FROM 5 TO 10
+        )
     
     # SPY tracker for benchmark
     spy_tracker = StrategyTracker("S&P 500", INITIAL_CASH)
@@ -724,15 +616,15 @@ def run_simulation():
     for i in range(total_bars):
         current_date = common_dates[i]
         
-        # Get current prices for all stocks
+        # Get current prices
         current_prices = {symbol: stock_data_dict[symbol]['close'].iloc[i] 
                          for symbol in stock_data_dict}
         current_spy_price = spy_data['close'].iloc[i]
         
         # ============================================================
-        # DAILY UNIVERSE CHECK - FORCED LIQUIDATION
+        # OPTIONAL: UNIVERSE CHECKING - FORCED LIQUIDATION
         # ============================================================
-        if args.universe:
+        if args.universe and not args.no_universe_check:
             # Get approved tickers for this date
             approved_tickers = universe_manager.get_approved_tickers(
                 args.universe, 
@@ -749,11 +641,7 @@ def run_simulation():
             
             all_forced_exits.extend(forced_exits)
         
-        # ============================================================
-        # REGULAR SIMULATION LOGIC
-        # ============================================================
-        
-        # Update SPY tracker (buy and hold)
+        # Update SPY tracker
         if i == 0:
             spy_shares = INITIAL_CASH / current_spy_price
             spy_tracker.positions['SPY'] = spy_shares
@@ -764,10 +652,6 @@ def run_simulation():
         # Run each strategy
         for strategy in strategies:
             tracker = strategy_trackers[strategy.name]
-            
-            # Track positions before this bar
-            positions_before = tracker.get_current_position_count()
-            trades_before = tracker.get_num_trades()
             
             # Run strategy on each stock
             for symbol in stock_data_dict:
@@ -780,67 +664,24 @@ def run_simulation():
                 if signal:
                     signal_stats[strategy.name]['attempts'] += 1
                     
-                    # Check if we can actually execute
-                    can_execute = True
-                    reason = None
+                    # Execute the trade
+                    success = tracker.execute_trade(
+                        symbol, signal, 
+                        current_prices[symbol], current_date
+                    )
                     
-                    # For universe validation
-                    if args.universe:
-                        approved_tickers = universe_manager.get_approved_tickers(
-                            args.universe, 
-                            query_date=current_date.date()
-                        )
-                        if symbol not in approved_tickers:
-                            can_execute = False
-                            reason = "not_in_universe"
-                    
-                    # Check position limits for BUY
-                    if signal == 'BUY':
-                        current_positions = tracker.get_current_position_count()
-                        if current_positions >= tracker.max_positions:
-                            # Only execute if we don't already have this symbol
-                            if symbol not in tracker.positions or tracker.positions.get(symbol, 0) == 0:
-                                can_execute = False
-                                reason = "max_positions_reached"
-                    
-                    # Check if we have the position for SELL
-                    if signal == 'SELL':
-                        if tracker.positions.get(symbol, 0) <= 0:
-                            can_execute = False
-                            reason = "no_position_to_sell"
-                    
-                    if can_execute:
-                        # Execute the trade
-                        success = track_trade_execution(
-                            tracker, strategy, symbol, signal, 
-                            current_prices[symbol], current_date
-                        )
-                        
-                        if success:
-                            # Trade executed successfully!
-                            signal_stats[strategy.name]['executed'] += 1
-                        else:
-                            # Trade failed (probably insufficient cash)
-                            signal_stats[strategy.name]['blocked'] += 1
+                    if success:
+                        # Trade executed successfully!
+                        strategy.record_execution(signal, symbol)
+                        signal_stats[strategy.name]['executed'] += 1
                     else:
+                        # Trade failed
                         signal_stats[strategy.name]['blocked'] += 1
             
             # Update portfolio value
             tracker.update_portfolio_value(current_date, current_prices)
-            
-            # Debug output every 50 bars
-            if i % 50 == 0 and i > 0:
-                positions_after = tracker.get_current_position_count()
-                trades_after = tracker.get_num_trades()
-                
-                if trades_after > trades_before or positions_after != positions_before:
-                    print(f"\n📊 Bar {i}/{total_bars} - {strategy.name}:")
-                    print(f"   Positions: {positions_after}/{tracker.max_positions}")
-                    print(f"   Trades: {trades_after} (new: {trades_after - trades_before})")
-                    print(f"   Cash: ${tracker.cash:,.0f}")
-                    print(f"   Portfolio: ${tracker.get_final_value():,.0f}")
         
-        # Update plot every 10 bars for performance
+        # Update plot every 10 bars
         if i % 10 == 0 or i == total_bars - 1:
             # Update lines
             spy_line.set_data(spy_tracker.dates, spy_tracker.portfolio_value_history)
@@ -857,7 +698,6 @@ def run_simulation():
             table_ax.clear()
             table_ax.axis('off')
             
-            # Sort strategies by return
             sorted_strategies = sorted(
                 strategies,
                 key=lambda s: strategy_trackers[s.name].get_return_pct(),
@@ -915,10 +755,47 @@ def run_simulation():
             plt.pause(delay)
     
     # ============================================================
+    # OPTIONAL: END-OF-SIMULATION LIQUIDATION
+    # ============================================================
+    if args.force_liquidate:
+        print("\n📊 Liquidating all positions at end of simulation...")
+        
+        final_date = common_dates[-1]
+        final_prices = {symbol: stock_data_dict[symbol]['close'].iloc[-1] 
+                        for symbol in stock_data_dict}
+        
+        for strategy in strategies:
+            tracker = strategy_trackers[strategy.name]
+            positions_before = tracker.get_current_position_count()
+            
+            if positions_before > 0:
+                liquidated = tracker.force_liquidate_all(final_date, final_prices)
+                print(f"  {strategy.name}: Closed {liquidated} positions")
+                
+                # Update final portfolio value
+                tracker.update_portfolio_value(final_date, final_prices)
+        
+        # Also liquidate SPY benchmark
+        if spy_tracker.positions.get('SPY', 0) > 0:
+            spy_tracker.force_liquidate_all(final_date, {'SPY': final_prices.get('SPY', spy_data['close'].iloc[-1])})
+    else:
+        print("\n📊 Simulation complete - positions remain open for continuous tracking")
+        
+        # Just update final values without liquidating
+        final_date = common_dates[-1]
+        final_prices = {symbol: stock_data_dict[symbol]['close'].iloc[-1] 
+                        for symbol in stock_data_dict}
+        
+        for strategy in strategies:
+            tracker = strategy_trackers[strategy.name]
+            tracker.update_portfolio_value(final_date, final_prices)
+        
+        spy_tracker.update_portfolio_value(final_date, {'SPY': final_prices.get('SPY', spy_data['close'].iloc[-1])})
+    
+    # ============================================================
     # STORE RESULTS AND CREATE ANALYSIS BUTTONS
     # ============================================================
     
-    # Store final results
     results['strategy_trackers'] = strategy_trackers
     results['spy_tracker'] = spy_tracker
     results['stock_data'] = stock_data_dict
@@ -937,12 +814,8 @@ def run_simulation():
         print(f"  Blocked/Failed: {stats['blocked']}")
         print(f"  Execution rate: {(stats['executed']/stats['attempts']*100) if stats['attempts'] > 0 else 0:.1f}%")
     
-    # Print strategy debug stats
-    for strategy in strategies:
-        strategy.print_debug_stats()
-    
-    # Print summary of forced exits
-    if all_forced_exits:
+    # Print forced exits summary only if universe checking was enabled
+    if all_forced_exits and not args.no_universe_check:
         print(f"\n{'='*70}")
         print(f"FORCED LIQUIDATION SUMMARY")
         print(f"{'='*70}")
@@ -951,25 +824,49 @@ def run_simulation():
             print(f"  • {exit['date'].date()}: {exit['strategy']} sold {exit['symbol']}")
         print(f"{'='*70}\n")
     
-    # Add analysis buttons dynamically - MUST be after results are stored
+    # ============================================================
+    # OPEN POSITIONS SUMMARY
+    # ============================================================
+    print(f"\n{'='*70}")
+    print(f"FINAL POSITIONS SUMMARY")
+    print(f"{'='*70}")
+    
+    for strategy in strategies:
+        tracker = strategy_trackers[strategy.name]
+        open_positions = tracker.get_current_position_count()
+        
+        if open_positions > 0:
+            print(f"\n{strategy.name}:")
+            print(f"  Open positions: {open_positions}")
+            print(f"  Cash: ${tracker.cash:,.2f}")
+            print(f"  Portfolio value: ${tracker.get_final_value():,.2f}")
+            
+            # List each position
+            for symbol in SYMBOLS:
+                shares = tracker.positions.get(symbol, 0)
+                if shares > 0:
+                    current_price = stock_data_dict[symbol]['close'].iloc[-1]
+                    position_value = shares * current_price
+                    print(f"    {symbol}: {shares:.2f} shares @ ${current_price:.2f} = ${position_value:,.2f}")
+        else:
+            print(f"\n{strategy.name}: No open positions (all cash: ${tracker.cash:,.2f})")
+    
+    print(f"\n{'='*70}\n")
+    
+    # Add analysis buttons
     button_y = 0.20
     button_spacing = 0.05
+    button_refs = []
     
     print(f"\nCreating analysis buttons for {len(strategies)} strategies...")
-    print(f"Available strategies in results: {list(strategy_trackers.keys())}")
-    
-    # Create list to store button references (prevents garbage collection)
-    button_refs = []
     
     for idx, strategy in enumerate(strategies):
         y_pos = button_y - (idx * button_spacing)
         
-        # Stop if we run out of space
         if y_pos < 0.02:
-            print(f"Warning: Too many strategies to show all buttons. Showing first {idx} strategies.")
+            print(f"Warning: Too many strategies to show all buttons. Showing first {idx}.")
             break
         
-        # Verify this strategy exists in trackers
         if strategy.name not in strategy_trackers:
             print(f"  ERROR: Strategy '{strategy.name}' not found in trackers!")
             continue
@@ -979,21 +876,18 @@ def run_simulation():
         ax_btn = fig.add_axes([0.77, y_pos, 0.21, 0.04])
         btn_label = f'Analyze {strategy.name}'
         
-        # Truncate label if too long
         if len(btn_label) > 22:
             btn_label = btn_label[:19] + '...'
         
         btn = Button(ax_btn, btn_label)
-        button_refs.append(btn)  # Keep reference to prevent garbage collection
+        button_refs.append(btn)
         
         print(f"  Button {idx+1}: '{btn_label}' -> '{strategy.name}' (trades: {len(tracker.trades)})")
         
-        # Create closure that captures everything needed
         def make_handler(strat_obj, track_obj, stock_dict, syms):
             def handler(event):
                 print(f"\n{'='*60}")
                 print(f"Analyze button clicked for: {strat_obj.name}")
-                print(f"Tracker has {len(track_obj.trades)} trades")
                 print(f"{'='*60}")
                 try:
                     show_strategy_analysis(strat_obj, track_obj, stock_dict, syms)
@@ -1005,11 +899,10 @@ def run_simulation():
         
         btn.on_clicked(make_handler(strategy, tracker, stock_data_dict, SYMBOLS))
     
-    # Store button references in results to prevent garbage collection
     results['buttons'] = button_refs
     
     is_running = False
-    print("Simulation complete!")
+    print("\nSimulation complete!")
     plt.show()
 
 # ============================================================
@@ -1017,7 +910,6 @@ def run_simulation():
 # ============================================================
 
 if __name__ == '__main__':
-    # Load strategies
     load_strategies()
     
     if not strategies:
@@ -1029,5 +921,4 @@ if __name__ == '__main__':
     print(f"Loaded {len(strategies)} strategies")
     print(f"{'='*70}\n")
     
-    # Run simulation
     run_simulation()

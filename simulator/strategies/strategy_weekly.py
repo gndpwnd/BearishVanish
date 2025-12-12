@@ -1,7 +1,10 @@
 """
-Weekly Threshold Strategy
-Generates signals based on week-over-week percentage changes on Mondays.
-BUY when stock drops >= 5%, SELL when stock rises >= 10%.
+Weekly Threshold Strategy - PURE LOGIC WITH ROLLING WINDOWS
+Buy if stock drops 5% over past 7 days or 30 days
+Sell if stock rises 10% over past 7 days or 30 days
+
+Uses rolling windows instead of calendar dates
+Separate tracking for weekly and monthly signals
 """
 
 import sys
@@ -14,45 +17,72 @@ import pandas as pd
 class Strategy(StrategyBase):
     def __init__(self, color="red", buy_threshold=-0.05, sell_threshold=0.10):
         super().__init__(name="Weekly Threshold", color=color)
-        self.buy_threshold = buy_threshold
-        self.sell_threshold = sell_threshold
+        self.buy_threshold = buy_threshold      # -5% for buy
+        self.sell_threshold = sell_threshold    # +10% for sell
         
     def reset(self):
         super().reset()
-        self.last_monday_price = {}
-        self.last_monday_date = {}
+        # Track last executed signal per timeframe per symbol
+        self.last_weekly_signal = {}   # 'BUY', 'SELL', or None
+        self.last_monthly_signal = {}  # 'BUY', 'SELL', or None
     
     def on_data(self, stock_data, spy_data, current_date, symbol):
-        if len(stock_data) < 2:
+        # Need at least 30 bars for monthly calculation
+        if len(stock_data) < 30:
             return None
         
         # Initialize tracking for this symbol
-        if symbol not in self.last_monday_price:
-            self.last_monday_price[symbol] = None
-            self.last_monday_date[symbol] = None
+        if symbol not in self.last_weekly_signal:
+            self.last_weekly_signal[symbol] = None
+            self.last_monthly_signal[symbol] = None
         
         current_price = stock_data['close'].iloc[-1]
         
-        # Check if current date is a Monday
-        if current_date.weekday() == 0:  # Monday
-            # If we have a previous Monday, check thresholds
-            if self.last_monday_price[symbol] is not None:
-                pct_change = (current_price - self.last_monday_price[symbol]) / self.last_monday_price[symbol]
-                
-                if pct_change <= self.buy_threshold and self.can_generate_signal('BUY', symbol):
-                    # Update for next week
-                    self.last_monday_price[symbol] = current_price
-                    self.last_monday_date[symbol] = current_date
-                    return self.emit_signal('BUY', symbol)
-                
-                elif pct_change >= self.sell_threshold and self.can_generate_signal('SELL', symbol):
-                    # Update for next week
-                    self.last_monday_price[symbol] = current_price
-                    self.last_monday_date[symbol] = current_date
-                    return self.emit_signal('SELL', symbol)
-            
-            # Update last Monday price
-            self.last_monday_price[symbol] = current_price
-            self.last_monday_date[symbol] = current_date
+        # ==============================================================
+        # CALCULATE ROLLING RETURNS
+        # ==============================================================
+        
+        # 7-day return (1 week)
+        if len(stock_data) >= 7:
+            price_7d_ago = stock_data['close'].iloc[-7]
+            return_7d = (current_price - price_7d_ago) / price_7d_ago
+        else:
+            return_7d = 0
+        
+        # 30-day return (1 month)
+        price_30d_ago = stock_data['close'].iloc[-30]
+        return_30d = (current_price - price_30d_ago) / price_30d_ago
+        
+        # ==============================================================
+        # WEEKLY SIGNALS (7-day rolling window)
+        # ==============================================================
+        
+        # BUY if dropped 5%+ in past week AND last weekly signal wasn't BUY
+        if return_7d <= self.buy_threshold:
+            if self.last_weekly_signal[symbol] != 'BUY' and self.can_generate_signal('BUY', symbol):
+                self.last_weekly_signal[symbol] = 'BUY'
+                return self.emit_signal('BUY', symbol)
+        
+        # SELL if rose 10%+ in past week AND had a weekly BUY before
+        elif return_7d >= self.sell_threshold:
+            if self.last_weekly_signal[symbol] == 'BUY' and self.can_generate_signal('SELL', symbol):
+                self.last_weekly_signal[symbol] = 'SELL'
+                return self.emit_signal('SELL', symbol)
+        
+        # ==============================================================
+        # MONTHLY SIGNALS (30-day rolling window)
+        # ==============================================================
+        
+        # BUY if dropped 5%+ in past month AND last monthly signal wasn't BUY
+        if return_30d <= self.buy_threshold:
+            if self.last_monthly_signal[symbol] != 'BUY' and self.can_generate_signal('BUY', symbol):
+                self.last_monthly_signal[symbol] = 'BUY'
+                return self.emit_signal('BUY', symbol)
+        
+        # SELL if rose 10%+ in past month AND had a monthly BUY before
+        elif return_30d >= self.sell_threshold:
+            if self.last_monthly_signal[symbol] == 'BUY' and self.can_generate_signal('SELL', symbol):
+                self.last_monthly_signal[symbol] = 'SELL'
+                return self.emit_signal('SELL', symbol)
         
         return None

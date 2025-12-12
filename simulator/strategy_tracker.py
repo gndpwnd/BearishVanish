@@ -1,29 +1,24 @@
 """
-Enhanced Strategy Tracker with Fractional Shares and Configurable Capital
-Supports multiple starting capital amounts and flexible position sizing
+Enhanced Strategy Tracker with Flexible Position Sizing and Force-Liquidation Support
+Supports multiple starting capital amounts and flexible position limits
 """
 
 import numpy as np
 import pandas as pd
 
-# Configurable starting capital - easy to test different amounts
-INITIAL_CASH = 100000  # Start with $100k (changed from $10k)
-# Alternative amounts to test:
-# INITIAL_CASH = 10000    # $10k - Small account
-# INITIAL_CASH = 50000    # $50k - Medium account  
-# INITIAL_CASH = 100000   # $100k - Large account
-# INITIAL_CASH = 1000000  # $1M - Institutional
+# Configurable starting capital
+INITIAL_CASH = 100000  # Start with $100k
 
 class StrategyTracker:
-    def __init__(self, strategy_name, initial_cash=INITIAL_CASH, position_size_pct=0.20, max_positions=5):
+    def __init__(self, strategy_name, initial_cash=INITIAL_CASH, position_size_pct=0.20, max_positions=10):
         """
-        Initialize Strategy Tracker with configurable parameters
+        Initialize Strategy Tracker with flexible parameters
         
         Args:
             strategy_name: Name of the strategy
             initial_cash: Starting capital amount
-            position_size_pct: Percentage of cash per position (default 20% = 0.20)
-            max_positions: Maximum concurrent positions allowed
+            position_size_pct: Percentage of portfolio per position (default 20%)
+            max_positions: Maximum concurrent positions (default 10, was 5)
         """
         self.name = strategy_name
         self.initial_cash = initial_cash
@@ -43,35 +38,43 @@ class StrategyTracker:
         """Count non-zero positions"""
         return sum(1 for shares in self.positions.values() if shares > 0)
     
-    def execute_trade(self, symbol, signal, price, date):
+    def execute_trade(self, symbol, signal, price, date, force=False):
         """
-        Execute trade with SMART POSITION SIZING and FRACTIONAL SHARES
+        Execute trade with SMART POSITION SIZING and return success status
         
-        Features:
-        - Configurable position size (default 20%)
-        - Maximum position limit
-        - Fractional shares (rounded to 2 decimals)
-        - Minimum position size check ($100)
-        - Tracks position values
+        Args:
+            symbol: Stock symbol
+            signal: 'BUY' or 'SELL'
+            price: Current price
+            date: Current date
+            force: If True, bypass position limits (for forced liquidation)
+            
+        Returns:
+            bool: True if trade executed, False if blocked
         """
+        
         if signal == 'BUY' and self.cash > 0:
-            # Check if we're at max positions
-            current_positions = self.get_current_position_count()
-            if current_positions >= self.max_positions:
-                # Only buy if we don't already have this symbol
-                if symbol not in self.positions or self.positions.get(symbol, 0) == 0:
-                    return  # Skip - at max capacity
+            # Check if we're at max positions (unless forced)
+            if not force:
+                current_positions = self.get_current_position_count()
+                if current_positions >= self.max_positions:
+                    # Only block if opening a NEW position
+                    if symbol not in self.positions or self.positions.get(symbol, 0) == 0:
+                        return False  # Blocked by max positions
             
-            # Calculate allocation based on percentage
-            allocation = self.cash * self.position_size_pct
+            # Calculate allocation based on PORTFOLIO value, not just cash
+            portfolio_value = self.get_current_portfolio_value(
+                {s: price for s in self.positions if self.positions.get(s, 0) > 0}
+            )
+            allocation = portfolio_value * self.position_size_pct
             
-            # Only trade if position would be at least $100
-            if allocation >= 100:
-                # Calculate fractional shares (2 decimal places)
-                shares = round(allocation / price, 2)
+            # Ensure we don't exceed available cash
+            allocation = min(allocation, self.cash)
+            
+            if allocation >= 100:  # Minimum position size
+                shares = round(allocation / price, 2)  # Fractional shares
                 actual_cost = shares * price
                 
-                # Ensure we have enough cash
                 if actual_cost <= self.cash:
                     self.positions[symbol] = self.positions.get(symbol, 0) + shares
                     self.cash -= actual_cost
@@ -83,17 +86,18 @@ class StrategyTracker:
                         'action': 'BUY',
                         'price': price, 
                         'shares': shares,
-                        'cost': actual_cost
+                        'cost': actual_cost,
+                        'forced': force
                     })
+                    return True  # Trade succeeded
+            return False  # Insufficient allocation
                     
         elif signal == 'SELL' and self.positions.get(symbol, 0) > 0:
-            # Sell entire position
             shares = self.positions[symbol]
             proceeds = shares * price
             self.cash += proceeds
             self.positions[symbol] = 0
             
-            # Remove from position values
             if symbol in self.position_values:
                 del self.position_values[symbol]
             
@@ -103,22 +107,58 @@ class StrategyTracker:
                 'action': 'SELL',
                 'price': price, 
                 'shares': shares, 
-                'proceeds': proceeds
+                'proceeds': proceeds,
+                'forced': force
             })
+            return True  # Trade succeeded
+        
+        return False  # No trade executed
+    
+    def get_current_portfolio_value(self, current_prices):
+        """Calculate current portfolio value including cash and positions"""
+        total_value = self.cash
+        for symbol, shares in self.positions.items():
+            if symbol in current_prices and shares > 0:
+                total_value += shares * current_prices[symbol]
+        return total_value
 
     def update_portfolio_value(self, date, current_prices):
         """Update portfolio value and track position values"""
-        total_value = self.cash
+        total_value = self.get_current_portfolio_value(current_prices)
         
+        # Update position values for tracking
         for symbol, shares in self.positions.items():
             if symbol in current_prices and shares > 0:
-                position_value = shares * current_prices[symbol]
-                total_value += position_value
-                self.position_values[symbol] = position_value
+                self.position_values[symbol] = shares * current_prices[symbol]
         
         self.portfolio_value_history.append(total_value)
         self.dates.append(date)
         return total_value
+    
+    def force_liquidate_all(self, date, current_prices):
+        """
+        Force liquidate all positions at end of simulation
+        
+        Args:
+            date: Current date
+            current_prices: Dict of {symbol: price}
+            
+        Returns:
+            int: Number of positions liquidated
+        """
+        liquidated = 0
+        for symbol in list(self.positions.keys()):
+            if self.positions.get(symbol, 0) > 0 and symbol in current_prices:
+                success = self.execute_trade(
+                    symbol, 'SELL', 
+                    current_prices[symbol], 
+                    date, 
+                    force=True
+                )
+                if success:
+                    liquidated += 1
+        
+        return liquidated
     
     def get_final_value(self):
         return self.portfolio_value_history[-1] if self.portfolio_value_history else self.initial_cash
@@ -461,7 +501,7 @@ class StrategyTracker:
     
     def print_debug_info(self):
         """Print debug information about current portfolio state"""
-        print(f"\n📊 {self.name} Portfolio State:")
+        print(f"\n {self.name} Portfolio State:")
         print(f"   Cash: ${self.cash:,.2f}")
         print(f"   Positions: {self.get_current_position_count()}/{self.max_positions}")
         print(f"   Total Trades: {len(self.trades)} (Buy: {self.get_num_buys()}, Sell: {self.get_num_sells()})")
