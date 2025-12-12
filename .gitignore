@@ -5,3 +5,7 @@
 **.pkl
 **.db
 **/offline_data/
+**/test_universes/
+**/universes/
+**/test_results/
+**.json

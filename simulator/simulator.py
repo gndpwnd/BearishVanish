@@ -1,12 +1,15 @@
 """
-Stock Trading Strategy Simulator - Parallel Data Loading
-Main entry point for backtesting trading strategies with concurrent data fetching
+Stock Trading Strategy Simulator - With Universe Management and System Benchmarking
+Main entry point for backtesting trading strategies with automatic position liquidation
+
+THIS IS THE NEW SIMULATOR SCRIPT
 """
 
 import os
 import sys
 import argparse
 from pathlib import Path
+from datetime import date
 from dotenv import load_dotenv
 import importlib.util
 import matplotlib.pyplot as plt
@@ -16,41 +19,305 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 from data_manager import DataManager
+from stock_universe import UniverseManager
 from strategy_tracker import StrategyTracker, INITIAL_CASH
 from strategy_analysis import show_strategy_analysis
-
-# Parse command line arguments first
-parser = argparse.ArgumentParser(description='Stock Strategy Simulator')
-parser.add_argument('--cache-status', action='store_true', help='Show offline cache status')
-parser.add_argument('--download', action='store_true', help='Download data for all symbols')
-parser.add_argument('--offline', action='store_true', help='Run in offline mode')
-parser.add_argument('--workers', type=int, default=10, help='Number of parallel workers for data loading')
-args = parser.parse_args()
+from system_benchmark import SystemBenchmark
 
 # Load API credentials
 load_dotenv()
 api_key = os.getenv('ALPACA_API_KEY')
 secret_key = os.getenv('ALPACA_SECRET_KEY')
 
+# Get recommended workers from benchmark if available
+default_download_workers, default_db_workers = SystemBenchmark.get_recommended_workers()
+
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Stock Strategy Simulator with Universe Management & Benchmarking')
+
+# Data management arguments
+parser.add_argument('--cache-status', action='store_true', help='Show offline cache status')
+parser.add_argument('--download', action='store_true', help='Download data for symbols')
+parser.add_argument('--tickers', type=str, help='Comma-separated list of tickers to download (e.g., AAPL,MSFT,GOOGL)')
+parser.add_argument('--offline', action='store_true', help='Run in offline mode')
+parser.add_argument('--download-workers', type=int, default=default_download_workers,
+                   help=f'Number of workers for downloads (default: {default_download_workers} from benchmark)')
+parser.add_argument('--db-workers', type=int, default=default_db_workers,
+                   help=f'Number of workers for database reads (default: {default_db_workers} from benchmark)')
+parser.add_argument('--workers', type=int, help='Override both download and db workers (legacy support)')
+
+# Universe management arguments
+parser.add_argument('--update-universe', type=str, help='Update universe: sp500, nasdaq100, russell3000, or all')
+parser.add_argument('--universe', type=str, help='Run simulation with specific universe: sp500, nasdaq100, russell3000')
+parser.add_argument('--universe-status', action='store_true', help='Show universe status')
+parser.add_argument('--check-ticker', type=str, help='Check if a ticker is in any universe (e.g., AAPL)')
+parser.add_argument('--clear-universe', type=str, help='Clear universe data: sp500, nasdaq100, russell3000, or all')
+
+# Diagnostic arguments
+parser.add_argument('--diagnose', type=str, help='Diagnose mismatch for universe: sp500, nasdaq100, russell3000')
+parser.add_argument('--check-quality', type=str, help='Check data quality for universe')
+parser.add_argument('--find-duplicates', type=str, help='Find duplicate ticker issues in universe')
+parser.add_argument('--compare', nargs=2, metavar=('UNIVERSE1', 'UNIVERSE2'), help='Compare two universes')
+
+# Validation arguments
+parser.add_argument('--validate', type=str, help='Validate tickers for universe: sp500, nasdaq100, russell3000')
+parser.add_argument('--cleanup-db', action='store_true', help='Clean up database (remove invalid tickers)')
+
+# Benchmark arguments
+parser.add_argument('--benchmark', action='store_true', help='Run system benchmark and recommend worker counts')
+parser.add_argument('--show-benchmark', action='store_true', help='Show saved benchmark results')
+
+args = parser.parse_args()
+
+# Handle --workers override for backward compatibility
+if args.workers:
+    args.download_workers = args.workers
+    args.db_workers = args.workers
+
 # Configuration
-HISTORY = 180  # 6 months (approximately 180 days)
-TOTAL_DURATION = 3.0  # seconds
-SYMBOLS = ['AAPL', 'GOOGL', 'TSLA', 'MSFT', 'NVDA', 'META']
+HISTORY = 180  # 6 months of data
+TOTAL_DURATION = 3.0  # seconds for visualization
 strategy_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
 
-# Initialize DataManager
-data_manager = DataManager(api_key, secret_key, offline_mode=args.offline)
+# ============================================================
+# BENCHMARK COMMANDS (Before creating data manager)
+# ============================================================
 
-# Handle command line options
+if args.benchmark:
+    print("\n" + "="*70)
+    print("SYSTEM BENCHMARK MODE")
+    print("="*70)
+    
+    # Initialize managers for benchmarking
+    data_manager = DataManager(api_key, secret_key, offline_mode=False)
+    universe_manager = UniverseManager(api_key, secret_key)
+    
+    # Run full benchmark
+    benchmark = SystemBenchmark(data_manager, universe_manager)
+    results = benchmark.run_full_benchmark()
+    
+    sys.exit(0)
+
+if args.show_benchmark:
+    print("\n" + "="*70)
+    print("SAVED BENCHMARK RESULTS")
+    print("="*70)
+    
+    results = SystemBenchmark.load_benchmark()
+    
+    if not results:
+        print("❌ No benchmark results found")
+        print("   Run: python simulator.py --benchmark")
+    else:
+        import json
+        print(json.dumps(results, indent=2))
+        
+        if 'recommendations' in results:
+            rec = results['recommendations']
+            print("\n🎯 RECOMMENDED WORKER COUNTS:")
+            print(f"  Download workers: {rec['download_workers']}")
+            print(f"  Database workers: {rec['db_workers']}")
+    
+    print("="*70)
+    sys.exit(0)
+
+# Initialize managers
+data_manager = DataManager(api_key, secret_key, offline_mode=args.offline)
+universe_manager = UniverseManager(api_key, secret_key)
+
+# ============================================================
+# UNIVERSE MANAGEMENT COMMANDS
+# ============================================================
+
+if args.update_universe:
+    print("\n" + "="*70)
+    print("UNIVERSE UPDATE MODE")
+    print("="*70)
+    universe_manager.update_universe(args.update_universe)
+    sys.exit(0)
+
+if args.universe_status:
+    universe_manager.print_status()
+    sys.exit(0)
+
+if args.check_ticker:
+    universe_manager.print_ticker_info(args.check_ticker)
+    sys.exit(0)
+
+if args.clear_universe:
+    universe_manager.clear_universe(args.clear_universe)
+    sys.exit(0)
+
+# ============================================================
+# DIAGNOSTIC COMMANDS
+# ============================================================
+
+if args.diagnose:
+    print("\n" + "="*70)
+    print("UNIVERSE DIAGNOSTICS MODE")
+    print("="*70)
+    universe_manager.diagnose_mismatch(args.diagnose)
+    sys.exit(0)
+
+if args.check_quality:
+    print("\n" + "="*70)
+    print("DATA QUALITY CHECK MODE")
+    print("="*70)
+    if hasattr(universe_manager, 'diagnostics'):
+        universe_manager.diagnostics.check_data_quality(args.check_quality)
+    else:
+        print("ERROR: diagnostics module not available")
+    sys.exit(0)
+
+if args.find_duplicates:
+    print("\n" + "="*70)
+    print("DUPLICATE ANALYSIS MODE")
+    print("="*70)
+    if hasattr(universe_manager, 'diagnostics'):
+        universe_manager.diagnostics.find_duplicate_issues(args.find_duplicates)
+    else:
+        print("ERROR: diagnostics module not available")
+    sys.exit(0)
+
+if args.compare:
+    print("\n" + "="*70)
+    print("UNIVERSE COMPARISON MODE")
+    print("="*70)
+    if hasattr(universe_manager, 'diagnostics'):
+        universe_manager.diagnostics.compare_universes(args.compare[0], args.compare[1])
+    else:
+        print("ERROR: diagnostics module not available")
+    sys.exit(0)
+
+# ============================================================
+# VALIDATION COMMANDS
+# ============================================================
+
+if args.validate:
+    print("\n" + "="*70)
+    print("TICKER VALIDATION MODE")
+    print("="*70)
+    
+    # Get tickers from universe
+    tickers = universe_manager.get_approved_tickers(args.validate)
+    
+    if not tickers:
+        print(f"No tickers found for {args.validate}")
+        sys.exit(1)
+    
+    # Validate them
+    from ticker_validation import TickerValidator
+    valid, invalid, stats = TickerValidator.print_validation_report(tickers)
+    
+    if invalid:
+        print(f"\n💡 TIP: Run --cleanup-db to remove invalid tickers from database")
+    
+    sys.exit(0)
+
+if args.cleanup_db:
+    print("\n" + "="*70)
+    print("DATABASE CLEANUP MODE")
+    print("="*70)
+    
+    from ticker_validation import TickerValidator
+    import sqlite3
+    
+    conn = sqlite3.connect(universe_manager.db_path)
+    cursor = conn.cursor()
+    
+    # Get all symbols from database
+    cursor.execute('''
+        SELECT DISTINCT symbol, universe_name
+        FROM universe_constituents
+        WHERE date_removed IS NULL
+    ''')
+    
+    all_entries = cursor.fetchall()
+    total_entries = len(all_entries)
+    
+    print(f"\n📊 Found {total_entries} active entries in database")
+    print(f"🔍 Checking for invalid tickers...\n")
+    
+    invalid_count = 0
+    for symbol, universe_name in all_entries:
+        if not TickerValidator.is_valid(symbol):
+            print(f"  ❌ Removing invalid ticker: '{symbol}' from {universe_name}")
+            
+            # Mark as removed
+            cursor.execute('''
+                UPDATE universe_constituents
+                SET date_removed = ?
+                WHERE symbol = ? AND universe_name = ? AND date_removed IS NULL
+            ''', (date.today(), symbol, universe_name))
+            
+            invalid_count += 1
+    
+    if invalid_count > 0:
+        conn.commit()
+        print(f"\n✅ Removed {invalid_count} invalid tickers from database")
+        print(f"📊 Remaining active entries: {total_entries - invalid_count}")
+    else:
+        print(f"✅ No invalid tickers found - database is clean!")
+    
+    conn.close()
+    print(f"\n{'='*70}\n")
+    sys.exit(0)
+
+# ============================================================
+# CACHE STATUS COMMAND
+# ============================================================
+
 if args.cache_status:
     data_manager.print_cache_status()
     sys.exit(0)
 
+# ============================================================
+# DOWNLOAD COMMAND (MOVED BEFORE SYMBOL SELECTION)
+# ============================================================
+
 if args.download:
-    print(f"Downloading data for all symbols using {args.workers} workers...")
-    symbols_to_download = SYMBOLS + ['SPY']
+    print(f"\n{'='*70}")
+    print(f"DOWNLOADING DATA")
+    print(f"{'='*70}\n")
     
-    # Parallel download
+    # Determine which symbols to download
+    if args.tickers:
+        # Download specific tickers
+        symbols_to_download = [t.strip().upper() for t in args.tickers.split(',')]
+        print(f"📦 Downloading specific tickers: {', '.join(symbols_to_download)}")
+        
+    elif args.universe:
+        if args.universe == 'all':
+            # Download ALL universes
+            print("📦 Downloading data for ALL universes...")
+            
+            all_symbols = set()
+            for universe_name in ['sp500', 'nasdaq100', 'russell3000']:
+                symbols = universe_manager.get_approved_tickers(universe_name)
+                print(f"  ✅ {universe_name}: {len(symbols)} stocks")
+                all_symbols.update(symbols)
+            
+            symbols_to_download = sorted(list(all_symbols)) + ['SPY']
+            print(f"\n📊 Total unique stocks: {len(all_symbols)}")
+            
+        else:
+            # Download specific universe
+            symbols_to_download = universe_manager.get_approved_tickers(args.universe)
+            if not symbols_to_download:
+                print(f"❌ No symbols found for universe: {args.universe}")
+                print(f"   Run: python simulator.py --update-universe {args.universe}")
+                sys.exit(1)
+            
+            symbols_to_download = symbols_to_download + ['SPY']
+            print(f"📦 Downloading data for {args.universe}: {len(symbols_to_download)-1} stocks")
+    else:
+        # No universe specified, use default symbols
+        symbols_to_download = ['AAPL', 'GOOGL', 'TSLA', 'MSFT', 'NVDA', 'META', 'SPY']
+        print(f"📦 Downloading data for default stocks")
+    
+    print(f"🔧 Using {args.download_workers} parallel workers (from benchmark)\n")
+    
+    # Parallel download with recommended workers
     def download_symbol(symbol):
         try:
             df = data_manager.get_stock_data(symbol, days=HISTORY)
@@ -59,94 +326,78 @@ if args.download:
             return (symbol, None, str(e))
     
     results = {}
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+    successful = 0
+    failed = 0
+    
+    print(f"Downloading {len(symbols_to_download)} symbols...")
+    
+    with ThreadPoolExecutor(max_workers=args.download_workers) as executor:
         futures = {executor.submit(download_symbol, sym): sym for sym in symbols_to_download}
         
         for future in as_completed(futures):
             symbol, df, error = future.result()
-            if error:
-                print(f"✗ {symbol}: Error - {error}")
+            if error or df is None:  # ← FIXED: Check for None
+                error_msg = error if error else "No data returned"
+                print(f"❌ {symbol}: Error - {error_msg}")
                 results[symbol] = None
+                failed += 1
             else:
-                print(f"✓ {symbol}: {len(df)} bars downloaded")
+                print(f"✅ {symbol}: {len(df)} bars downloaded")
                 results[symbol] = df
+                successful += 1
     
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     print(f"DOWNLOAD COMPLETE")
-    print(f"Successful: {sum(1 for v in results.values() if v is not None)}/{len(symbols_to_download)}")
-    print(f"{'='*60}\n")
+    print(f"Successful: {successful}/{len(symbols_to_download)}")
+    if failed > 0:
+        print(f"Failed: {failed}/{len(symbols_to_download)}")
+    print(f"{'='*70}\n")
     sys.exit(0)
+# ============================================================
+# SYMBOL SELECTION: From Universe or Hardcoded
+# ============================================================
+
+if args.universe:
+    # Load symbols from universe
+    print(f"\n{'='*70}")
+    print(f"LOADING SYMBOLS FROM {args.universe.upper()} UNIVERSE")
+    print(f"{'='*70}")
+    
+    SYMBOLS = universe_manager.get_approved_tickers(args.universe)
+    
+    if not SYMBOLS:
+        print(f"❌ No symbols found for universe: {args.universe}")
+        print(f"   Run: python simulator.py --update-universe {args.universe}")
+        sys.exit(1)
+    
+    print(f"✅ Loaded {len(SYMBOLS)} symbols from {args.universe}")
+    print(f"   Sample: {SYMBOLS[:10]}")
+    print(f"{'='*70}\n")
+else:
+    # Use hardcoded symbols (original behavior)
+    SYMBOLS = ['AAPL', 'GOOGL', 'TSLA', 'MSFT', 'NVDA', 'META']
+    print(f"\nUsing default symbols: {SYMBOLS}")
+    if len(SYMBOLS) > 100:
+        print(f"⚠️  Warning: Trading {len(SYMBOLS)} symbols - simulation may be slow")
+        print(f"   Consider using fewer stocks or specific strategies")
+
+# ============================================================
+# OFFLINE MODE BANNER
+# ============================================================
 
 if args.offline:
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("RUNNING IN OFFLINE MODE")
-    print("="*60)
+    print("="*70)
     print("Using cached data only. Will fail if data is missing.")
-    print("="*60 + "\n")
+    print("="*70 + "\n")
 
-# Global state
+# ============================================================
+# STRATEGY LOADING
+# ============================================================
+
 strategies = []
-results = {}
-is_running = False
-print_lock = threading.Lock()  # For thread-safe printing
-
-def fetch_stock_data(symbol, days=HISTORY):
-    """Fetch stock data using DataManager (handles offline/online automatically)"""
-    return data_manager.get_stock_data(symbol, days=days)
-
-def fetch_stock_data_parallel(symbols, days=HISTORY, max_workers=None):
-    """
-    Fetch multiple stocks in parallel using thread pool
-    SQLite handles concurrent reads efficiently
-    
-    Args:
-        symbols: List of stock symbols
-        days: Number of days of history
-        max_workers: Number of parallel threads (default: min(10, len(symbols)))
-    
-    Returns:
-        Dictionary of {symbol: dataframe}
-    """
-    if max_workers is None:
-        max_workers = min(args.workers, len(symbols))
-    
-    print(f"Loading {len(symbols)} symbols using {max_workers} parallel workers...")
-    
-    stock_data_dict = {}
-    errors = []
-    
-    def load_symbol(symbol):
-        try:
-            with print_lock:
-                print(f"  [{threading.current_thread().name}] Loading {symbol}...")
-            df = fetch_stock_data(symbol, days)
-            return (symbol, df, None)
-        except Exception as e:
-            return (symbol, None, str(e))
-    
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='DataLoader') as executor:
-        # Submit all tasks
-        futures = {executor.submit(load_symbol, sym): sym for sym in symbols}
-        
-        # Collect results as they complete
-        for future in as_completed(futures):
-            symbol, df, error = future.result()
-            if error:
-                errors.append((symbol, error))
-                with print_lock:
-                    print(f"  ✗ {symbol}: {error}")
-            else:
-                stock_data_dict[symbol] = df
-                with print_lock:
-                    print(f"  ✓ {symbol}: {len(df)} bars loaded")
-    
-    if errors:
-        print(f"\n⚠ Warning: {len(errors)} symbols failed to load")
-        for symbol, error in errors:
-            print(f"  - {symbol}: {error}")
-    
-    print(f"✓ Successfully loaded {len(stock_data_dict)}/{len(symbols)} symbols\n")
-    return stock_data_dict
+print_lock = threading.Lock()
 
 def load_strategies():
     """Load all strategy files from strategies/ directory"""
@@ -173,7 +424,7 @@ def load_strategies():
                 color = strategy_colors[idx % len(strategy_colors)]
                 strategy_instance = module.Strategy(color=color)
                 
-                # Override name with filename if not custom set or if name is default
+                # Override name with filename if not custom set
                 filename_name = strategy_file.stem.replace('strategy_', '').replace('_', ' ').title()
                 if not hasattr(strategy_instance, 'name') or strategy_instance.name == "Strategy":
                     strategy_instance.name = filename_name
@@ -183,16 +434,120 @@ def load_strategies():
         except Exception as e:
             print(f"Error loading {strategy_file}: {e}")
 
+# ============================================================
+# DATA FETCHING (with parallel support and auto-tuned workers)
+# ============================================================
+
+def fetch_stock_data(symbol, days=HISTORY):
+    """Fetch stock data using DataManager"""
+    return data_manager.get_stock_data(symbol, days=days)
+
+def fetch_stock_data_parallel(symbols, days=HISTORY, max_workers=None):
+    """Fetch multiple stocks in parallel using thread pool"""
+    if max_workers is None:
+        max_workers = min(args.db_workers, len(symbols))
+    
+    print(f"Loading {len(symbols)} symbols using {max_workers} parallel workers...")
+    
+    stock_data_dict = {}
+    errors = []
+    
+    def load_symbol(symbol):
+        try:
+            with print_lock:
+                print(f"  [{threading.current_thread().name}] Loading {symbol}...")
+            df = fetch_stock_data(symbol, days)
+            return (symbol, df, None)
+        except Exception as e:
+            return (symbol, None, str(e))
+    
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='DataLoader') as executor:
+        futures = {executor.submit(load_symbol, sym): sym for sym in symbols}
+        
+        for future in as_completed(futures):
+            symbol, df, error = future.result()
+            if error or df is None:  # ← FIXED: Check for None
+                error_msg = error if error else "No data returned"
+                errors.append((symbol, error_msg))
+                with print_lock:
+                    print(f"  ❌ {symbol}: {error_msg}")
+            else:
+                stock_data_dict[symbol] = df
+                with print_lock:
+                    print(f"  ✅ {symbol}: {len(df)} bars loaded")
+    
+    if errors:
+        print(f"\n⚠️  Warning: {len(errors)} symbols failed to load")
+        print(f"    Continuing with {len(stock_data_dict)} successful symbols")
+    
+    print(f"✅ Successfully loaded {len(stock_data_dict)}/{len(symbols)} symbols\n")
+    return stock_data_dict
+
+# ============================================================
+# FORCED LIQUIDATION FUNCTION (The "Override/Dump" Feature)
+# ============================================================
+
+def check_and_liquidate_invalid_positions(current_date, strategy_trackers, approved_tickers, current_prices):
+    """
+    Check all positions against approved universe
+    Force liquidate any positions not in approved list
+    
+    This is the OVERRIDE function that automatically sells delisted stocks
+    """
+    forced_exits = []
+    
+    for strategy_name, tracker in strategy_trackers.items():
+        for symbol in list(tracker.positions.keys()):
+            shares = tracker.positions.get(symbol, 0)
+            
+            if shares > 0 and symbol not in approved_tickers:
+                # FORCE SELL - Stock removed from universe
+                print(f"\n⚠️  OVERRIDE: {symbol} not in approved universe")
+                print(f"   → Forcing liquidation for {strategy_name}")
+                
+                # Execute forced sell
+                if symbol in current_prices:
+                    price = current_prices[symbol]
+                    tracker.execute_trade(
+                        symbol=symbol,
+                        signal='SELL',
+                        price=price,
+                        date=current_date
+                    )
+                    
+                    # Mark as forced exit in trades list
+                    if tracker.trades:
+                        tracker.trades[-1]['forced_exit'] = True
+                        tracker.trades[-1]['reason'] = 'DELISTED_FROM_UNIVERSE'
+                    
+                    forced_exits.append({
+                        'date': current_date,
+                        'strategy': strategy_name,
+                        'symbol': symbol,
+                        'shares': shares,
+                        'price': price,
+                        'reason': 'DELISTED_FROM_UNIVERSE'
+                    })
+                    
+                    print(f"   → Sold {shares:.2f} shares @ ${price:.2f}")
+                else:
+                    print(f"   ⚠️  WARNING: No price data for {symbol}, marking as liquidated")
+                    tracker.positions[symbol] = 0
+    
+    return forced_exits
+
+# ============================================================
+# MAIN SIMULATION FUNCTION
+# ============================================================
+
 def run_simulation():
-    """Main simulation loop with parallel data loading"""
+    """Main simulation loop with universe checking and forced liquidation"""
     global results, is_running
     is_running = True
     results = {}
     
-    # Load all stock data IN PARALLEL
-    print("Loading data...")
-    
     # Load SPY first (needed for alignment)
+    print("Loading data...")
     try:
         spy_data = fetch_stock_data("SPY")
     except Exception as e:
@@ -217,7 +572,7 @@ def run_simulation():
     for symbol in stock_data_dict:
         stock_data_dict[symbol] = stock_data_dict[symbol].loc[common_dates]
     
-    print(f"\n✓ Data aligned: {len(common_dates)} common time points")
+    print(f"\n✅ Data aligned: {len(common_dates)} common time points")
     
     total_bars = len(common_dates)
     delay = TOTAL_DURATION / total_bars if total_bars > 0 else 0.01
@@ -253,6 +608,9 @@ def run_simulation():
     table_ax = fig.add_axes([0.77, 0.35, 0.22, 0.5])
     table_ax.axis('off')
     
+    # Track forced exits
+    all_forced_exits = []
+    
     # Simulate bar by bar
     print("Running simulation...")
     for i in range(total_bars):
@@ -262,6 +620,30 @@ def run_simulation():
         current_prices = {symbol: stock_data_dict[symbol]['close'].iloc[i] 
                          for symbol in stock_data_dict}
         current_spy_price = spy_data['close'].iloc[i]
+        
+        # ============================================================
+        # DAILY UNIVERSE CHECK - FORCED LIQUIDATION
+        # ============================================================
+        if args.universe:
+            # Get approved tickers for this date
+            approved_tickers = universe_manager.get_approved_tickers(
+                args.universe, 
+                query_date=current_date.date()
+            )
+            
+            # Check and liquidate invalid positions
+            forced_exits = check_and_liquidate_invalid_positions(
+                current_date=current_date,
+                strategy_trackers=strategy_trackers,
+                approved_tickers=approved_tickers,
+                current_prices=current_prices
+            )
+            
+            all_forced_exits.extend(forced_exits)
+        
+        # ============================================================
+        # REGULAR SIMULATION LOGIC
+        # ============================================================
         
         # Update SPY tracker (buy and hold)
         if i == 0:
@@ -282,7 +664,13 @@ def run_simulation():
                 
                 signal = strategy.on_data(stock_bar, spy_bar, current_date, symbol)
                 
+                # Only execute if we have a signal and it's allowed
                 if signal:
+                    # If universe is specified, only trade approved stocks
+                    if args.universe:
+                        if symbol not in approved_tickers:
+                            continue  # Skip trading this symbol
+                    
                     tracker.execute_trade(symbol, signal, current_prices[symbol], current_date)
             
             # Update portfolio value
@@ -350,86 +738,94 @@ def run_simulation():
             
             # Color code profit column
             for row in range(1, len(table_data)):
-                profit_val = tracker.get_profit_dollars() if row <= len(sorted_strategies) else spy_profit
+                if row <= len(sorted_strategies):
+                    profit_val = strategy_trackers[sorted_strategies[row-1].name].get_profit_dollars()
+                else:
+                    profit_val = spy_profit
+                
                 if profit_val > 0:
-                    table[(row, 2)].set_facecolor('#E8F5E9')  # Light green
+                    table[(row, 2)].set_facecolor('#E8F5E9')
                 elif profit_val < 0:
-                    table[(row, 2)].set_facecolor('#FFEBEE')  # Light red
+                    table[(row, 2)].set_facecolor('#FFEBEE')
             
             plt.pause(delay)
     
-    # Store final results
+    # ============================================================
+    # STORE RESULTS AND CREATE ANALYSIS BUTTONS
+    # ============================================================
+    
     results['strategy_trackers'] = strategy_trackers
     results['spy_tracker'] = spy_tracker
     results['stock_data'] = stock_data_dict
     results['common_dates'] = common_dates
     results['strategies'] = strategies
+    results['forced_exits'] = all_forced_exits
     
-    # Add analysis buttons dynamically - MUST be after results are stored
+    # Print summary of forced exits
+    if all_forced_exits:
+        print(f"\n{'='*70}")
+        print(f"FORCED LIQUIDATION SUMMARY")
+        print(f"{'='*70}")
+        print(f"Total forced exits: {len(all_forced_exits)}")
+        for exit in all_forced_exits:
+            print(f"  • {exit['date'].date()}: {exit['strategy']} sold {exit['symbol']}")
+        print(f"{'='*70}\n")
+    
+    # Create analysis buttons
     button_y = 0.20
     button_spacing = 0.05
-    
-    print(f"\nCreating analysis buttons for {len(strategies)} strategies...")
-    print(f"Available strategies in results: {list(strategy_trackers.keys())}")
-    
-    # Create list to store button references (prevents garbage collection)
     button_refs = []
     
+    print(f"\nCreating analysis buttons for {len(strategies)} strategies...")
+    
     for idx, strategy in enumerate(strategies):
+        # FIXED: Complete the y_pos calculation
         y_pos = button_y - (idx * button_spacing)
         
-        # Stop if we run out of space
-        if y_pos < 0.02:
-            print(f"Warning: Too many strategies to show all buttons. Showing first {idx} strategies.")
-            break
+        # Create button for this strategy
+        button_ax = fig.add_axes([0.77, y_pos, 0.20, 0.04])
         
-        # Verify this strategy exists in trackers
-        if strategy.name not in strategy_trackers:
-            print(f"  ERROR: Strategy '{strategy.name}' not found in trackers!")
-            continue
+        # Create button with strategy name
+        button = Button(button_ax, f'Analyze {strategy.name}', 
+                       color=strategy.color, hovercolor='lightgray')
         
-        tracker = strategy_trackers[strategy.name]
+        # Create callback for this strategy
+        def make_callback(strat_name):
+            def callback(event):
+                show_strategy_analysis(
+                    strategy=strategies[[s.name for s in strategies].index(strat_name)],
+                    tracker=strategy_trackers[strat_name],
+                    stock_data=stock_data_dict,
+                    symbols=SYMBOLS
+                )
+            return callback
         
-        ax_btn = fig.add_axes([0.77, y_pos, 0.21, 0.04])
-        btn_label = f'Analyze {strategy.name}'
+        button.on_clicked(make_callback(strategy.name))
+        button_refs.append(button)
         
-        # Truncate label if too long
-        if len(btn_label) > 22:
-            btn_label = btn_label[:19] + '...'
-        
-        btn = Button(ax_btn, btn_label)
-        button_refs.append(btn)  # Keep reference to prevent garbage collection
-        
-        print(f"  Button {idx+1}: '{btn_label}' -> '{strategy.name}' (trades: {len(tracker.trades)})")
-        
-        # Create closure that captures everything needed
-        def make_handler(strat_obj, track_obj, stock_dict, syms):
-            def handler(event):
-                print(f"\n{'='*60}")
-                print(f"Analyze button clicked for: {strat_obj.name}")
-                print(f"Tracker has {len(track_obj.trades)} trades")
-                print(f"{'='*60}")
-                try:
-                    show_strategy_analysis(strat_obj, track_obj, stock_dict, syms)
-                except Exception as e:
-                    print(f"ERROR in analysis window: {e}")
-                    import traceback
-                    traceback.print_exc()
-            return handler
-        
-        btn.on_clicked(make_handler(strategy, tracker, stock_data_dict, SYMBOLS))
+    print(f"✅ Created {len(button_refs)} analysis buttons")
     
-    # Store button references in results to prevent garbage collection
-    results['buttons'] = button_refs
-    
+    # Keep figure open
     is_running = False
-    print("Simulation complete!")
     plt.show()
 
-# Main execution
+
+# ============================================================
+# MAIN EXECUTION
+# ============================================================
+
 if __name__ == '__main__':
+    # Load strategies
     load_strategies()
-    if strategies:
-        run_simulation()
-    else:
-        print("No strategies loaded. Add strategy files to strategies/ directory.")
+    
+    if not strategies:
+        print("\n⚠️  No strategies found in strategies/ directory")
+        print("Add strategy files named strategy_*.py")
+        sys.exit(1)
+    
+    print(f"\n{'='*70}")
+    print(f"Loaded {len(strategies)} strategies")
+    print(f"{'='*70}\n")
+    
+    # Run simulation
+    run_simulation()
