@@ -353,6 +353,7 @@ if args.download:
         print(f"Failed: {failed}/{len(symbols_to_download)}")
     print(f"{'='*70}\n")
     sys.exit(0)
+
 # ============================================================
 # SYMBOL SELECTION: From Universe or Hardcoded
 # ============================================================
@@ -443,19 +444,19 @@ def fetch_stock_data(symbol, days=HISTORY):
     return data_manager.get_stock_data(symbol, days=days)
 
 def fetch_stock_data_parallel(symbols, days=HISTORY, max_workers=None):
-    """Fetch multiple stocks in parallel using thread pool"""
+    """Fetch multiple stocks in parallel with tqdm progress bar"""
     if max_workers is None:
         max_workers = min(args.db_workers, len(symbols))
     
-    print(f"Loading {len(symbols)} symbols using {max_workers} parallel workers...")
+    from tqdm import tqdm
+    
+    print(f"\n📊 Loading {len(symbols)} symbols with {max_workers} workers...")
     
     stock_data_dict = {}
     errors = []
     
     def load_symbol(symbol):
         try:
-            with print_lock:
-                print(f"  [{threading.current_thread().name}] Loading {symbol}...")
             df = fetch_stock_data(symbol, days)
             return (symbol, df, None)
         except Exception as e:
@@ -464,23 +465,27 @@ def fetch_stock_data_parallel(symbols, days=HISTORY, max_workers=None):
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='DataLoader') as executor:
         futures = {executor.submit(load_symbol, sym): sym for sym in symbols}
         
-        for future in as_completed(futures):
-            symbol, df, error = future.result()
-            if error or df is None:  # ← FIXED: Check for None
-                error_msg = error if error else "No data returned"
-                errors.append((symbol, error_msg))
-                with print_lock:
-                    print(f"  ❌ {symbol}: {error_msg}")
-            else:
-                stock_data_dict[symbol] = df
-                with print_lock:
-                    print(f"  ✅ {symbol}: {len(df)} bars loaded")
+        # Progress bar with tqdm
+        with tqdm(total=len(symbols), desc="Loading data", unit="stock") as pbar:
+            for future in as_completed(futures):
+                symbol, df, error = future.result()
+                
+                if error or df is None:
+                    error_msg = error if error else "No data returned"
+                    errors.append((symbol, error_msg))
+                    tqdm.write(f"  ❌ {symbol}: {error_msg}")
+                else:
+                    stock_data_dict[symbol] = df
+                
+                pbar.update(1)
     
+    # Summary
     if errors:
-        print(f"\n⚠️  Warning: {len(errors)} symbols failed to load")
-        print(f"    Continuing with {len(stock_data_dict)} successful symbols")
+        print(f"\n⚠️  {len(errors)} symbols failed to load")
+        print(f"✅ Continuing with {len(stock_data_dict)}/{len(symbols)} symbols\n")
+    else:
+        print(f"✅ All {len(stock_data_dict)} symbols loaded successfully\n")
     
-    print(f"✅ Successfully loaded {len(stock_data_dict)}/{len(symbols)} symbols\n")
     return stock_data_dict
 
 # ============================================================
@@ -537,6 +542,35 @@ def check_and_liquidate_invalid_positions(current_date, strategy_trackers, appro
     return forced_exits
 
 # ============================================================
+# HELPER FUNCTION TO TRACK TRADE EXECUTION
+# ============================================================
+
+def track_trade_execution(tracker, strategy, symbol, signal, price, date):
+    """
+    Helper to execute trade and track if it succeeded
+    
+    Returns:
+        bool: True if trade executed, False if blocked
+    """
+    trades_before = tracker.get_num_trades()
+    cash_before = tracker.cash
+    
+    # Attempt execution
+    success = tracker.execute_trade(symbol, signal, price, date)
+    
+    # Check if it actually executed
+    trades_after = tracker.get_num_trades()
+    cash_after = tracker.cash
+    
+    if success:
+        # Success! Record in strategy
+        strategy.record_execution(signal, symbol)
+        return True
+    else:
+        # Failed (insufficient cash, position limits, etc.)
+        return False
+
+# ============================================================
 # MAIN SIMULATION FUNCTION
 # ============================================================
 
@@ -562,6 +596,77 @@ def run_simulation():
         print("Error: No stock data loaded")
         is_running = False
         return
+    
+    # ============================================================
+    # COMPREHENSIVE DEBUG: Strategy Signal Analysis
+    # ============================================================
+    
+    print(f"\n🔍 DEBUG: Comprehensive Strategy Signal Analysis...")
+    
+    for strategy in strategies:
+        print(f"\n{'='*70}")
+        print(f"Strategy: {strategy.name}")
+        print(f"{'='*70}")
+        
+        # Check across ALL bars, not just first 50
+        signal_summary = {
+            'total_checked': 0,
+            'signals_generated': 0,
+            'buy_signals': 0,
+            'sell_signals': 0,
+            'stocks_with_signals': set()
+        }
+        
+        # Sample 50 stocks across the full date range
+        sample_stocks = list(stock_data_dict.keys())[:50]
+        
+        for symbol in sample_stocks:
+            stock_bar = stock_data_dict[symbol]
+            spy_bar = spy_data
+            
+            # Check every 10th bar to avoid slowdown
+            for bar_idx in range(0, len(spy_bar), 10):
+                signal_summary['total_checked'] += 1
+                
+                if bar_idx < len(stock_bar):
+                    test_bar = stock_bar.iloc[:bar_idx+1]
+                    test_spy = spy_bar.iloc[:bar_idx+1]
+                    test_date = spy_bar.index[bar_idx]
+                    
+                    signal = strategy.on_data(test_bar, test_spy, test_date, symbol)
+                    
+                    if signal:
+                        signal_summary['signals_generated'] += 1
+                        signal_summary['stocks_with_signals'].add(symbol)
+                        
+                        if signal == 'BUY':
+                            signal_summary['buy_signals'] += 1
+                        elif signal == 'SELL':
+                            signal_summary['sell_signals'] += 1
+        
+        print(f"\nSignal Generation Analysis:")
+        print(f"  Bars checked: {signal_summary['total_checked']}")
+        print(f"  Signals generated: {signal_summary['signals_generated']}")
+        print(f"  BUY signals: {signal_summary['buy_signals']}")
+        print(f"  SELL signals: {signal_summary['sell_signals']}")
+        print(f"  Stocks with signals: {len(signal_summary['stocks_with_signals'])}/50")
+        print(f"  Signal frequency: {(signal_summary['signals_generated']/signal_summary['total_checked']*100) if signal_summary['total_checked'] > 0 else 0:.2f}%")
+        
+        if signal_summary['signals_generated'] == 0:
+            print(f"\n  ⚠️  WARNING: No signals generated!")
+            print(f"  Strategy conditions might be too strict")
+            print(f"  Check your strategy logic in {strategy.name}")
+        elif signal_summary['signals_generated'] < 10:
+            print(f"\n  ⚠️  WARNING: Very few signals ({signal_summary['signals_generated']})")
+            print(f"  Strategy is too conservative for {len(SYMBOLS)} stocks")
+        
+        # Show which stocks generate signals
+        if signal_summary['stocks_with_signals']:
+            print(f"\n  Stocks generating signals:")
+            for sym in list(signal_summary['stocks_with_signals'])[:10]:
+                print(f"    • {sym}")
+            if len(signal_summary['stocks_with_signals']) > 10:
+                print(f"    ... and {len(signal_summary['stocks_with_signals']) - 10} more")
     
     # Align all data to common dates
     common_dates = spy_data.index
@@ -611,8 +716,11 @@ def run_simulation():
     # Track forced exits
     all_forced_exits = []
     
+    # Track signal statistics
+    signal_stats = {strategy.name: {'attempts': 0, 'blocked': 0, 'executed': 0} for strategy in strategies}
+    
     # Simulate bar by bar
-    print("Running simulation...")
+    print("\nRunning simulation...")
     for i in range(total_bars):
         current_date = common_dates[i]
         
@@ -657,24 +765,80 @@ def run_simulation():
         for strategy in strategies:
             tracker = strategy_trackers[strategy.name]
             
+            # Track positions before this bar
+            positions_before = tracker.get_current_position_count()
+            trades_before = tracker.get_num_trades()
+            
             # Run strategy on each stock
             for symbol in stock_data_dict:
                 stock_bar = stock_data_dict[symbol].iloc[:i+1]
                 spy_bar = spy_data.iloc[:i+1]
                 
+                # Generate signal
                 signal = strategy.on_data(stock_bar, spy_bar, current_date, symbol)
                 
-                # Only execute if we have a signal and it's allowed
                 if signal:
-                    # If universe is specified, only trade approved stocks
-                    if args.universe:
-                        if symbol not in approved_tickers:
-                            continue  # Skip trading this symbol
+                    signal_stats[strategy.name]['attempts'] += 1
                     
-                    tracker.execute_trade(symbol, signal, current_prices[symbol], current_date)
+                    # Check if we can actually execute
+                    can_execute = True
+                    reason = None
+                    
+                    # For universe validation
+                    if args.universe:
+                        approved_tickers = universe_manager.get_approved_tickers(
+                            args.universe, 
+                            query_date=current_date.date()
+                        )
+                        if symbol not in approved_tickers:
+                            can_execute = False
+                            reason = "not_in_universe"
+                    
+                    # Check position limits for BUY
+                    if signal == 'BUY':
+                        current_positions = tracker.get_current_position_count()
+                        if current_positions >= tracker.max_positions:
+                            # Only execute if we don't already have this symbol
+                            if symbol not in tracker.positions or tracker.positions.get(symbol, 0) == 0:
+                                can_execute = False
+                                reason = "max_positions_reached"
+                    
+                    # Check if we have the position for SELL
+                    if signal == 'SELL':
+                        if tracker.positions.get(symbol, 0) <= 0:
+                            can_execute = False
+                            reason = "no_position_to_sell"
+                    
+                    if can_execute:
+                        # Execute the trade
+                        success = track_trade_execution(
+                            tracker, strategy, symbol, signal, 
+                            current_prices[symbol], current_date
+                        )
+                        
+                        if success:
+                            # Trade executed successfully!
+                            signal_stats[strategy.name]['executed'] += 1
+                        else:
+                            # Trade failed (probably insufficient cash)
+                            signal_stats[strategy.name]['blocked'] += 1
+                    else:
+                        signal_stats[strategy.name]['blocked'] += 1
             
             # Update portfolio value
             tracker.update_portfolio_value(current_date, current_prices)
+            
+            # Debug output every 50 bars
+            if i % 50 == 0 and i > 0:
+                positions_after = tracker.get_current_position_count()
+                trades_after = tracker.get_num_trades()
+                
+                if trades_after > trades_before or positions_after != positions_before:
+                    print(f"\n📊 Bar {i}/{total_bars} - {strategy.name}:")
+                    print(f"   Positions: {positions_after}/{tracker.max_positions}")
+                    print(f"   Trades: {trades_after} (new: {trades_after - trades_before})")
+                    print(f"   Cash: ${tracker.cash:,.0f}")
+                    print(f"   Portfolio: ${tracker.get_final_value():,.0f}")
         
         # Update plot every 10 bars for performance
         if i % 10 == 0 or i == total_bars - 1:
@@ -754,12 +918,28 @@ def run_simulation():
     # STORE RESULTS AND CREATE ANALYSIS BUTTONS
     # ============================================================
     
+    # Store final results
     results['strategy_trackers'] = strategy_trackers
     results['spy_tracker'] = spy_tracker
     results['stock_data'] = stock_data_dict
     results['common_dates'] = common_dates
     results['strategies'] = strategies
     results['forced_exits'] = all_forced_exits
+    
+    # Print final signal statistics
+    print("\n" + "="*70)
+    print("SIGNAL STATISTICS SUMMARY")
+    print("="*70)
+    for strategy_name, stats in signal_stats.items():
+        print(f"\n{strategy_name}:")
+        print(f"  Signal attempts: {stats['attempts']}")
+        print(f"  Successfully executed: {stats['executed']}")
+        print(f"  Blocked/Failed: {stats['blocked']}")
+        print(f"  Execution rate: {(stats['executed']/stats['attempts']*100) if stats['attempts'] > 0 else 0:.1f}%")
+    
+    # Print strategy debug stats
+    for strategy in strategies:
+        strategy.print_debug_stats()
     
     # Print summary of forced exits
     if all_forced_exits:
@@ -771,44 +951,66 @@ def run_simulation():
             print(f"  • {exit['date'].date()}: {exit['strategy']} sold {exit['symbol']}")
         print(f"{'='*70}\n")
     
-    # Create analysis buttons
+    # Add analysis buttons dynamically - MUST be after results are stored
     button_y = 0.20
     button_spacing = 0.05
-    button_refs = []
     
     print(f"\nCreating analysis buttons for {len(strategies)} strategies...")
+    print(f"Available strategies in results: {list(strategy_trackers.keys())}")
+    
+    # Create list to store button references (prevents garbage collection)
+    button_refs = []
     
     for idx, strategy in enumerate(strategies):
-        # FIXED: Complete the y_pos calculation
         y_pos = button_y - (idx * button_spacing)
         
-        # Create button for this strategy
-        button_ax = fig.add_axes([0.77, y_pos, 0.20, 0.04])
+        # Stop if we run out of space
+        if y_pos < 0.02:
+            print(f"Warning: Too many strategies to show all buttons. Showing first {idx} strategies.")
+            break
         
-        # Create button with strategy name
-        button = Button(button_ax, f'Analyze {strategy.name}', 
-                       color=strategy.color, hovercolor='lightgray')
+        # Verify this strategy exists in trackers
+        if strategy.name not in strategy_trackers:
+            print(f"  ERROR: Strategy '{strategy.name}' not found in trackers!")
+            continue
         
-        # Create callback for this strategy
-        def make_callback(strat_name):
-            def callback(event):
-                show_strategy_analysis(
-                    strategy=strategies[[s.name for s in strategies].index(strat_name)],
-                    tracker=strategy_trackers[strat_name],
-                    stock_data=stock_data_dict,
-                    symbols=SYMBOLS
-                )
-            return callback
+        tracker = strategy_trackers[strategy.name]
         
-        button.on_clicked(make_callback(strategy.name))
-        button_refs.append(button)
+        ax_btn = fig.add_axes([0.77, y_pos, 0.21, 0.04])
+        btn_label = f'Analyze {strategy.name}'
         
-    print(f"✅ Created {len(button_refs)} analysis buttons")
+        # Truncate label if too long
+        if len(btn_label) > 22:
+            btn_label = btn_label[:19] + '...'
+        
+        btn = Button(ax_btn, btn_label)
+        button_refs.append(btn)  # Keep reference to prevent garbage collection
+        
+        print(f"  Button {idx+1}: '{btn_label}' -> '{strategy.name}' (trades: {len(tracker.trades)})")
+        
+        # Create closure that captures everything needed
+        def make_handler(strat_obj, track_obj, stock_dict, syms):
+            def handler(event):
+                print(f"\n{'='*60}")
+                print(f"Analyze button clicked for: {strat_obj.name}")
+                print(f"Tracker has {len(track_obj.trades)} trades")
+                print(f"{'='*60}")
+                try:
+                    show_strategy_analysis(strat_obj, track_obj, stock_dict, syms)
+                except Exception as e:
+                    print(f"ERROR in analysis window: {e}")
+                    import traceback
+                    traceback.print_exc()
+            return handler
+        
+        btn.on_clicked(make_handler(strategy, tracker, stock_data_dict, SYMBOLS))
     
-    # Keep figure open
+    # Store button references in results to prevent garbage collection
+    results['buttons'] = button_refs
+    
     is_running = False
+    print("Simulation complete!")
     plt.show()
-
 
 # ============================================================
 # MAIN EXECUTION

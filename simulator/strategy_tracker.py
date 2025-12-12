@@ -1,57 +1,134 @@
 """
-Strategy Tracker Module
-Handles tracking of trades, positions, and portfolio value for each strategy
+Enhanced Strategy Tracker with Fractional Shares and Configurable Capital
+Supports multiple starting capital amounts and flexible position sizing
 """
 
 import numpy as np
 import pandas as pd
 
-INITIAL_CASH = 10000  # Starting cash per strategy
+# Configurable starting capital - easy to test different amounts
+INITIAL_CASH = 100000  # Start with $100k (changed from $10k)
+# Alternative amounts to test:
+# INITIAL_CASH = 10000    # $10k - Small account
+# INITIAL_CASH = 50000    # $50k - Medium account  
+# INITIAL_CASH = 100000   # $100k - Large account
+# INITIAL_CASH = 1000000  # $1M - Institutional
 
 class StrategyTracker:
-    def __init__(self, strategy_name, initial_cash):
+    def __init__(self, strategy_name, initial_cash=INITIAL_CASH, position_size_pct=0.20, max_positions=5):
+        """
+        Initialize Strategy Tracker with configurable parameters
+        
+        Args:
+            strategy_name: Name of the strategy
+            initial_cash: Starting capital amount
+            position_size_pct: Percentage of cash per position (default 20% = 0.20)
+            max_positions: Maximum concurrent positions allowed
+        """
         self.name = strategy_name
+        self.initial_cash = initial_cash
         self.cash = initial_cash
+        self.position_size_pct = position_size_pct
+        self.max_positions = max_positions
+        
         self.positions = {}  # symbol: shares
         self.trades = []  # List of trade dicts
         self.portfolio_value_history = []
         self.dates = []
         
+        # Track position allocations
+        self.position_values = {}  # symbol: current value
+        
+    def get_current_position_count(self):
+        """Count non-zero positions"""
+        return sum(1 for shares in self.positions.values() if shares > 0)
+    
     def execute_trade(self, symbol, signal, price, date):
+        """
+        Execute trade with SMART POSITION SIZING and FRACTIONAL SHARES
+        
+        Features:
+        - Configurable position size (default 20%)
+        - Maximum position limit
+        - Fractional shares (rounded to 2 decimals)
+        - Minimum position size check ($100)
+        - Tracks position values
+        """
         if signal == 'BUY' and self.cash > 0:
-            shares = self.cash / price  # Buy with all available cash
-            self.positions[symbol] = self.positions.get(symbol, 0) + shares
-            self.cash = 0
-            self.trades.append({
-                'date': date, 'symbol': symbol, 'action': 'BUY',
-                'price': price, 'shares': shares
-            })
+            # Check if we're at max positions
+            current_positions = self.get_current_position_count()
+            if current_positions >= self.max_positions:
+                # Only buy if we don't already have this symbol
+                if symbol not in self.positions or self.positions.get(symbol, 0) == 0:
+                    return  # Skip - at max capacity
             
+            # Calculate allocation based on percentage
+            allocation = self.cash * self.position_size_pct
+            
+            # Only trade if position would be at least $100
+            if allocation >= 100:
+                # Calculate fractional shares (2 decimal places)
+                shares = round(allocation / price, 2)
+                actual_cost = shares * price
+                
+                # Ensure we have enough cash
+                if actual_cost <= self.cash:
+                    self.positions[symbol] = self.positions.get(symbol, 0) + shares
+                    self.cash -= actual_cost
+                    self.position_values[symbol] = actual_cost
+                    
+                    self.trades.append({
+                        'date': date, 
+                        'symbol': symbol, 
+                        'action': 'BUY',
+                        'price': price, 
+                        'shares': shares,
+                        'cost': actual_cost
+                    })
+                    
         elif signal == 'SELL' and self.positions.get(symbol, 0) > 0:
+            # Sell entire position
             shares = self.positions[symbol]
             proceeds = shares * price
             self.cash += proceeds
             self.positions[symbol] = 0
+            
+            # Remove from position values
+            if symbol in self.position_values:
+                del self.position_values[symbol]
+            
             self.trades.append({
-                'date': date, 'symbol': symbol, 'action': 'SELL',
-                'price': price, 'shares': shares, 'proceeds': proceeds
+                'date': date, 
+                'symbol': symbol, 
+                'action': 'SELL',
+                'price': price, 
+                'shares': shares, 
+                'proceeds': proceeds
             })
-    
+
     def update_portfolio_value(self, date, current_prices):
+        """Update portfolio value and track position values"""
         total_value = self.cash
+        
         for symbol, shares in self.positions.items():
             if symbol in current_prices and shares > 0:
-                total_value += shares * current_prices[symbol]
+                position_value = shares * current_prices[symbol]
+                total_value += position_value
+                self.position_values[symbol] = position_value
         
         self.portfolio_value_history.append(total_value)
         self.dates.append(date)
         return total_value
     
     def get_final_value(self):
-        return self.portfolio_value_history[-1] if self.portfolio_value_history else INITIAL_CASH
+        return self.portfolio_value_history[-1] if self.portfolio_value_history else self.initial_cash
     
     def get_return_pct(self):
-        return ((self.get_final_value() - INITIAL_CASH) / INITIAL_CASH) * 100
+        return ((self.get_final_value() - self.initial_cash) / self.initial_cash) * 100
+    
+    def get_profit_dollars(self):
+        """Get absolute profit in dollars"""
+        return self.get_final_value() - self.initial_cash
     
     def get_num_trades(self):
         return len(self.trades)
@@ -87,10 +164,6 @@ class StrategyTracker:
         
         return (wins / total_completed * 100) if total_completed > 0 else 0
     
-    def get_profit_dollars(self):
-        """Get absolute profit in dollars"""
-        return self.get_final_value() - INITIAL_CASH
-    
     def get_max_drawdown(self):
         """Calculate maximum drawdown percentage"""
         if not self.portfolio_value_history:
@@ -117,7 +190,7 @@ class StrategyTracker:
         if len(returns) == 0 or returns.std() == 0:
             return 0
         
-        return (returns.mean() / returns.std()) * np.sqrt(252 * 6.5)  # Annualized for hourly data
+        return (returns.mean() / returns.std()) * np.sqrt(252 * 6.5)  # Annualized
     
     def get_winning_trades(self):
         """Get list of winning trades"""
@@ -309,7 +382,7 @@ class StrategyTracker:
         if downside_std == 0 or pd.isna(downside_std):
             return 0
         
-        return (returns.mean() / downside_std) * np.sqrt(252 * 6.5)  # Annualized
+        return (returns.mean() / downside_std) * np.sqrt(252 * 6.5)
     
     def get_calmar_ratio(self):
         """Calmar Ratio: Annual return / Max drawdown"""
@@ -365,7 +438,6 @@ class StrategyTracker:
         running_max = np.maximum.accumulate(values)
         drawdowns = ((values - running_max) / running_max) * 100
         
-        # Only count periods in drawdown
         dd_periods = drawdowns[drawdowns < 0]
         
         return abs(np.mean(dd_periods)) if len(dd_periods) > 0 else 0
@@ -386,3 +458,19 @@ class StrategyTracker:
         avg_loss = abs(self.get_avg_loss())
         
         return avg_win / avg_loss if avg_loss > 0 else 0
+    
+    def print_debug_info(self):
+        """Print debug information about current portfolio state"""
+        print(f"\n📊 {self.name} Portfolio State:")
+        print(f"   Cash: ${self.cash:,.2f}")
+        print(f"   Positions: {self.get_current_position_count()}/{self.max_positions}")
+        print(f"   Total Trades: {len(self.trades)} (Buy: {self.get_num_buys()}, Sell: {self.get_num_sells()})")
+        print(f"   Portfolio Value: ${self.get_final_value():,.2f}")
+        print(f"   Return: {self.get_return_pct():.2f}%")
+        
+        if self.positions:
+            print(f"\n   Active Positions:")
+            for symbol, shares in self.positions.items():
+                if shares > 0:
+                    value = self.position_values.get(symbol, 0)
+                    print(f"      {symbol}: {shares:.2f} shares (${value:,.2f})")

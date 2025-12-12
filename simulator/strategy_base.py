@@ -1,5 +1,5 @@
 """
-Base class for trading strategies.
+Base class for trading strategies with FIXED signal state management.
 All strategies should inherit from this class and implement the on_data method.
 """
 
@@ -12,7 +12,11 @@ class StrategyBase:
     def reset(self):
         """Reset strategy state for a new simulation"""
         self.history = {}  # Track history per symbol
-        self.last_signal = {}  # Track last signal per symbol
+        self.last_executed_signal = {}  # Track EXECUTED signals per symbol (not attempted)
+        
+        # Debug tracking
+        self.attempted_signals = {}  # Track all signal attempts
+        self.blocked_signals = {}  # Track blocked signals
         
     def on_data(self, stock_data, spy_data, current_date, symbol):
         """
@@ -30,16 +34,77 @@ class StrategyBase:
         raise NotImplementedError("Strategies must implement on_data method")
     
     def can_generate_signal(self, signal_type, symbol):
-        """Ensure signals alternate per symbol (no consecutive BUY or SELL)"""
-        if symbol not in self.last_signal:
+        """
+        Check if we can generate this signal type for this symbol
+        
+        CRITICAL FIX: Only check EXECUTED signals, not attempted ones
+        This prevents "stuck" signals when max positions is reached
+        """
+        # First signal for this symbol - always allowed
+        if symbol not in self.last_executed_signal:
             return True
-        if self.last_signal[symbol] == signal_type:
+        
+        # Can't generate same signal twice in a row (must alternate BUY/SELL)
+        if self.last_executed_signal[symbol] == signal_type:
+            # Track that this was blocked
+            if symbol not in self.blocked_signals:
+                self.blocked_signals[symbol] = []
+            self.blocked_signals[symbol].append({
+                'signal': signal_type,
+                'reason': 'duplicate_signal'
+            })
             return False
+        
         return True
     
     def emit_signal(self, signal_type, symbol):
-        """Emit a signal and update last_signal for the symbol"""
+        """
+        Emit a signal for this symbol
+        
+        IMPORTANT: This does NOT update last_executed_signal
+        That only happens when the trade actually executes (see record_execution)
+        """
         if signal_type in ['BUY', 'SELL']:
-            self.last_signal[symbol] = signal_type
+            # Track attempted signal (for debugging)
+            if symbol not in self.attempted_signals:
+                self.attempted_signals[symbol] = []
+            self.attempted_signals[symbol].append(signal_type)
+            
             return signal_type
         return None
+    
+    def record_execution(self, signal_type, symbol):
+        """
+        Record that a signal was actually EXECUTED (trade completed)
+        
+        Call this from simulator after execute_trade succeeds
+        """
+        if signal_type in ['BUY', 'SELL']:
+            self.last_executed_signal[symbol] = signal_type
+    
+    def get_debug_stats(self):
+        """Get debug statistics about signal generation"""
+        return {
+            'symbols_with_attempts': len(self.attempted_signals),
+            'symbols_with_executions': len(self.last_executed_signal),
+            'symbols_with_blocks': len(self.blocked_signals),
+            'total_attempts': sum(len(v) for v in self.attempted_signals.values()),
+            'total_blocks': sum(len(v) for v in self.blocked_signals.values())
+        }
+    
+    def print_debug_stats(self):
+        """Print debug statistics"""
+        stats = self.get_debug_stats()
+        print(f"\n📊 {self.name} Signal Statistics:")
+        print(f"   Symbols with signal attempts: {stats['symbols_with_attempts']}")
+        print(f"   Symbols with executions: {stats['symbols_with_executions']}")
+        print(f"   Symbols with blocked signals: {stats['symbols_with_blocks']}")
+        print(f"   Total signal attempts: {stats['total_attempts']}")
+        print(f"   Total blocked signals: {stats['total_blocks']}")
+        
+        # Show sample of blocked signals
+        if self.blocked_signals:
+            print(f"\n   Sample blocked signals (first 5):")
+            for symbol in list(self.blocked_signals.keys())[:5]:
+                blocks = self.blocked_signals[symbol]
+                print(f"      {symbol}: {len(blocks)} blocks - {blocks[0]['reason']}")
