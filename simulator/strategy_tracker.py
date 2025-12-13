@@ -514,3 +514,182 @@ class StrategyTracker:
                 if shares > 0:
                     value = self.position_values.get(symbol, 0)
                     print(f"      {symbol}: {shares:.2f} shares (${value:,.2f})")
+
+
+    def get_portfolio_beta(self, spy_returns=None):
+        """
+        Calculate portfolio beta vs S&P 500
+        Beta measures volatility relative to the market
+        """
+        if len(self.portfolio_value_history) < 2:
+            return 1.0
+        
+        # Calculate portfolio returns
+        portfolio_returns = pd.Series(self.portfolio_value_history).pct_change().dropna()
+        
+        if spy_returns is None or len(spy_returns) == 0:
+            return 1.0  # Default to market beta if no SPY data
+        
+        # Ensure same length
+        min_len = min(len(portfolio_returns), len(spy_returns))
+        portfolio_returns = portfolio_returns.iloc[-min_len:]
+        spy_returns = spy_returns.iloc[-min_len:]
+        
+        # Calculate covariance and variance
+        covariance = portfolio_returns.cov(spy_returns)
+        spy_variance = spy_returns.var()
+        
+        if spy_variance == 0 or pd.isna(spy_variance):
+            return 1.0
+        
+        beta = covariance / spy_variance
+        return beta if not pd.isna(beta) else 1.0
+
+    def get_information_ratio(self, spy_returns=None):
+        """
+        Information Ratio: Risk-adjusted return vs benchmark
+        IR = (Portfolio Return - Benchmark Return) / Tracking Error
+        """
+        if len(self.portfolio_value_history) < 2:
+            return 0.0
+        
+        portfolio_returns = pd.Series(self.portfolio_value_history).pct_change().dropna()
+        
+        if spy_returns is None or len(spy_returns) == 0:
+            return 0.0
+        
+        # Ensure same length
+        min_len = min(len(portfolio_returns), len(spy_returns))
+        portfolio_returns = portfolio_returns.iloc[-min_len:]
+        spy_returns = spy_returns.iloc[-min_len:]
+        
+        # Calculate excess returns
+        excess_returns = portfolio_returns - spy_returns
+        
+        # Tracking error is std dev of excess returns
+        tracking_error = excess_returns.std()
+        
+        if tracking_error == 0 or pd.isna(tracking_error):
+            return 0.0
+        
+        # Information ratio
+        ir = excess_returns.mean() / tracking_error
+        return ir * np.sqrt(252 * 6.5) if not pd.isna(ir) else 0.0  # Annualized
+
+    def get_alpha(self, spy_return_pct=None):
+        """
+        Jensen's Alpha: Excess return above what CAPM predicts
+        Alpha = Portfolio Return - (Risk-free rate + Beta * (Market Return - Risk-free rate))
+        Assuming risk-free rate = 0 for simplicity
+        """
+        portfolio_return = self.get_return_pct()
+        
+        if spy_return_pct is None:
+            return portfolio_return  # If no benchmark, return portfolio return
+        
+        beta = self.get_portfolio_beta()
+        
+        # Alpha = Portfolio Return - Beta * Market Return
+        alpha = portfolio_return - (beta * spy_return_pct)
+        
+        return alpha
+
+    def get_trade_history_dataframe(self):
+        """
+        Get complete trade history as a DataFrame for easy analysis
+        """
+        if not self.trades:
+            return pd.DataFrame()
+        
+        # Convert trades to DataFrame
+        df = pd.DataFrame(self.trades)
+        
+        # Add computed columns
+        df['amount'] = df['price'] * df['shares']
+        
+        # Calculate P&L for sells
+        df['pnl'] = 0.0
+        df['pnl_pct'] = 0.0
+        
+        for symbol in df['symbol'].unique():
+            symbol_trades = df[df['symbol'] == symbol].copy()
+            
+            for i in range(len(symbol_trades)):
+                if symbol_trades.iloc[i]['action'] == 'SELL' and i > 0:
+                    # Find previous buy
+                    prev_buys = symbol_trades.iloc[:i]
+                    prev_buys = prev_buys[prev_buys['action'] == 'BUY']
+                    
+                    if len(prev_buys) > 0:
+                        # Calculate weighted average buy price
+                        total_shares = prev_buys['shares'].sum()
+                        total_cost = (prev_buys['price'] * prev_buys['shares']).sum()
+                        avg_buy_price = total_cost / total_shares if total_shares > 0 else 0
+                        
+                        sell_price = symbol_trades.iloc[i]['price']
+                        sell_shares = symbol_trades.iloc[i]['shares']
+                        
+                        pnl = (sell_price - avg_buy_price) * sell_shares
+                        pnl_pct = (sell_price - avg_buy_price) / avg_buy_price * 100 if avg_buy_price > 0 else 0
+                        
+                        # Update in main df
+                        df.loc[symbol_trades.iloc[i].name, 'pnl'] = pnl
+                        df.loc[symbol_trades.iloc[i].name, 'pnl_pct'] = pnl_pct
+        
+        return df
+
+    def get_stock_performance_summary(self):
+        """
+        Get performance summary for each stock traded
+        Returns dict with stock-level metrics
+        """
+        stock_summary = {}
+        
+        for symbol in set(t['symbol'] for t in self.trades):
+            symbol_trades = [t for t in self.trades if t['symbol'] == symbol]
+            
+            buys = [t for t in symbol_trades if t['action'] == 'BUY']
+            sells = [t for t in symbol_trades if t['action'] == 'SELL']
+            
+            total_invested = sum(t['shares'] * t['price'] for t in buys)
+            total_returned = sum(t.get('proceeds', 0) for t in sells)
+            
+            # Add unrealized value if still holding
+            current_shares = self.positions.get(symbol, 0)
+            unrealized_value = 0
+            
+            # Calculate P&L
+            pnl = total_returned - total_invested
+            pnl_pct = (pnl / total_invested * 100) if total_invested > 0 else 0
+            
+            # Win rate for this stock
+            wins = 0
+            total_trades = 0
+            
+            i = 0
+            while i < len(symbol_trades) - 1:
+                if symbol_trades[i]['action'] == 'BUY' and symbol_trades[i+1]['action'] == 'SELL':
+                    if symbol_trades[i+1]['price'] > symbol_trades[i]['price']:
+                        wins += 1
+                    total_trades += 1
+                    i += 2
+                else:
+                    i += 1
+            
+            win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+            
+            stock_summary[symbol] = {
+                'num_trades': len(symbol_trades),
+                'num_buys': len(buys),
+                'num_sells': len(sells),
+                'total_invested': total_invested,
+                'total_returned': total_returned,
+                'pnl': pnl,
+                'pnl_pct': pnl_pct,
+                'win_rate': win_rate,
+                'wins': wins,
+                'losses': total_trades - wins,
+                'current_shares': current_shares
+            }
+        
+        return stock_summary

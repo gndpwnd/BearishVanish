@@ -8,12 +8,27 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load API credentials
-load_dotenv()
+# ————————————————————
+# Load .env located one directory up from this script
+# ————————————————————
+
+# Directory this script lives in
+BASE_DIR = Path(__file__).resolve().parent
+
+# Path to the .env file
+ENV_PATH = BASE_DIR.parent / ".env"
+
+# Load environment variables from that .env
+load_dotenv(dotenv_path=ENV_PATH)
+
+# Now read your credentials
 api_key = os.getenv('ALPACA_API_KEY')
 secret_key = os.getenv('ALPACA_SECRET_KEY')
 
-# Import the modular universe manager
+# Optional: warn if either is missing
+if not api_key or not secret_key:
+    print(f"⚠️  Could not find API keys in {ENV_PATH}")
+
 from stock_universe import UniverseManager
 
 def test_basic_functionality():

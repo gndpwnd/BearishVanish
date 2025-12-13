@@ -3,6 +3,8 @@ Stock Trading Strategy Simulator - Simulation Engine
 Contains the core simulation logic and supporting functions
 """
 
+import signal
+import sys
 import time
 import threading
 from datetime import datetime, timedelta
@@ -12,6 +14,37 @@ from matplotlib.widgets import Button
 
 from strategy_tracker import StrategyTracker, INITIAL_CASH
 from strategy_analysis import show_strategy_analysis
+from simulation_telemetry import telemetry  # ADDED: Telemetry import
+import pandas as pd
+
+# ============================================================
+# CTRL+C GRACEFUL SHUTDOWN HANDLER
+# ============================================================
+
+# Global flag for clean shutdown
+_shutdown_requested = False
+
+def signal_handler(sig, frame):
+    """Handle CTRL+C gracefully"""
+    global _shutdown_requested
+    
+    print("\n\n⚠️  CTRL+C detected - Shutting down gracefully...")
+    print("⏳ Closing matplotlib windows...")
+    
+    _shutdown_requested = True
+    
+    # Close all matplotlib windows
+    plt.close('all')
+    
+    print("✅ Shutdown complete")
+    sys.exit(0)
+
+# Register the signal handler at module load
+signal.signal(signal.SIGINT, signal_handler)
+
+# ============================================================
+# CONFIGURATION AND GLOBAL STATE
+# ============================================================
 
 # Configuration
 HISTORY = 180  # 6 months of data
@@ -167,9 +200,11 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     args : argparse.Namespace
         Command line arguments with force_liquidate and no_universe_check flags
     """
-    global results, is_running
+    global results, is_running, _shutdown_requested
+    
     is_running = True
     results = {}
+    _shutdown_requested = False  # Reset at start of simulation
     
     # ============================================================
     # PRE-FILTER: Get approved universe ONCE at start
@@ -275,6 +310,26 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     total_bars = len(common_dates)
     delay = TOTAL_DURATION / total_bars if total_bars > 0 else 0.01
     
+    # ============================================================
+    # TELEMETRY: Start recording this simulation
+    # ============================================================
+    sim_id = telemetry.start_simulation(
+        universe_name=args.universe or 'custom',
+        symbols=symbols_with_data,
+        start_date=common_dates[0],
+        end_date=common_dates[-1],
+        initial_capital=INITIAL_CASH,
+        config={
+            'force_liquidate': args.force_liquidate,
+            'max_positions': 10,
+            'no_universe_check': args.no_universe_check
+        }
+    )
+    
+    print(f"\n📊 Telemetry Recording Started")
+    print(f"   Simulation ID: {sim_id}")
+    print(f"   Database: ./telemetry/simulations.db\n")
+    
     # Initialize strategy trackers
     strategy_trackers = {}
     for strategy in strategies:
@@ -323,6 +378,13 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     print("   This ensures no look-ahead bias and fair turn-taking\n")
     
     for i in range(total_bars):
+        # Check for shutdown request
+        if _shutdown_requested:
+            print("\n⚠️  Simulation interrupted by user")
+            is_running = False
+            plt.close('all')
+            return
+        
         current_date = common_dates[i]
         
         # Get current prices
@@ -342,6 +404,13 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
             spy_tracker.cash = 0
         
         spy_value = spy_tracker.update_portfolio_value(current_date, {'SPY': current_spy_price})
+        
+        # Record daily snapshot for SPY
+        telemetry.record_daily_snapshot(
+            sim_id, 'S&P 500', current_date, spy_value,
+            spy_tracker.cash, spy_value - spy_tracker.cash,
+            1 if spy_tracker.positions.get('SPY', 0) > 0 else 0
+        )
         
         # ============================================================
         # STRATEGY ITERATION: Each strategy analyzes all stocks
@@ -375,12 +444,39 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                         # Trade executed successfully!
                         strategy.record_execution(signal, symbol)
                         signal_stats[strategy.name]['executed'] += 1
+                        
+                        # ============================================================
+                        # TELEMETRY: Record the trade
+                        # ============================================================
+                        if signal == 'BUY':
+                            telemetry.record_trade_entry(
+                                sim_id, strategy.name, symbol,
+                                current_date, current_prices[symbol],
+                                tracker.positions[symbol]
+                            )
+                        elif signal == 'SELL':
+                            telemetry.record_trade_exit(
+                                sim_id, strategy.name, symbol,
+                                current_date, current_prices[symbol],
+                                forced=False, reason='STRATEGY_SIGNAL'
+                            )
+                        
                     else:
                         # Trade failed
                         signal_stats[strategy.name]['blocked'] += 1
             
             # Update portfolio value
-            tracker.update_portfolio_value(current_date, current_prices)
+            current_value = tracker.update_portfolio_value(current_date, current_prices)
+            
+            # Record daily snapshot for this strategy
+            positions_value = sum(shares * current_prices.get(symbol, 0) 
+                                for symbol, shares in tracker.positions.items())
+            
+            telemetry.record_daily_snapshot(
+                sim_id, strategy.name, current_date, current_value,
+                tracker.cash, positions_value,
+                tracker.get_current_position_count()
+            )
         
         # Update plot every 10 bars
         if i % 10 == 0 or i == total_bars - 1:
@@ -454,6 +550,13 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                     table[(row, 2)].set_facecolor('#FFEBEE')
             
             plt.pause(delay)
+            
+            # Check again after GUI update
+            if _shutdown_requested:
+                print("\n⚠️  Simulation interrupted by user")
+                is_running = False
+                plt.close('all')
+                return
     
     # OPTIONAL: END-OF-SIMULATION LIQUIDATION
     if args.force_liquidate:
@@ -470,6 +573,15 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
             if positions_before > 0:
                 liquidated = tracker.force_liquidate_all(final_date, final_prices)
                 print(f"  {strategy.name}: Closed {liquidated} positions")
+                
+                # Record forced exits in telemetry
+                for symbol in list(tracker.positions.keys()):
+                    if tracker.positions.get(symbol, 0) > 0:
+                        telemetry.record_trade_exit(
+                            sim_id, strategy.name, symbol,
+                            final_date, final_prices[symbol],
+                            forced=True, reason='FORCE_LIQUIDATION_END_OF_SIM'
+                        )
                 
                 # Update final portfolio value
                 tracker.update_portfolio_value(final_date, final_prices)
@@ -491,6 +603,20 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         
         spy_tracker.update_portfolio_value(final_date, {'SPY': final_prices.get('SPY', spy_data['close'].iloc[-1])})
     
+    # ============================================================
+    # TELEMETRY: Finalize all strategy metrics
+    # ============================================================
+    spy_returns = pd.Series(spy_tracker.portfolio_value_history).pct_change().dropna()
+    
+    print("\n" + "="*70)
+    print("FINALIZING TELEMETRY RECORDS")
+    print("="*70)
+    
+    for strategy in strategies:
+        tracker = strategy_trackers[strategy.name]
+        telemetry.finalize_strategy(sim_id, strategy.name, tracker, spy_returns)
+        print(f"✅ Recorded: {strategy.name}")
+    
     # STORE RESULTS AND CREATE ANALYSIS BUTTONS
     results['strategy_trackers'] = strategy_trackers
     results['spy_tracker'] = spy_tracker
@@ -498,6 +624,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     results['common_dates'] = common_dates
     results['strategies'] = strategies
     results['forced_exits'] = all_forced_exits
+    results['sim_id'] = sim_id  # ADDED: Store simulation ID
     
     # Print final signal statistics
     print("\n" + "="*70)
@@ -578,23 +705,43 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         
         print(f"  Button {idx+1}: '{btn_label}' -> '{strategy.name}' (trades: {len(tracker.trades)})")
         
-        def make_handler(strat_obj, track_obj, stock_dict, syms):
+        def make_handler(strat_obj, track_obj, stock_dict, syms, spy_track, s_id):
             def handler(event):
                 print(f"\n{'='*60}")
                 print(f"Analyze button clicked for: {strat_obj.name}")
                 print(f"{'='*60}")
                 try:
-                    show_strategy_analysis(strat_obj, track_obj, stock_dict, syms)
+                    # PASS SIM_ID and SPY_TRACKER to analysis!
+                    show_strategy_analysis(
+                        strat_obj, track_obj, stock_dict, syms,
+                        spy_tracker=spy_track,
+                        sim_id=s_id
+                    )
                 except Exception as e:
                     print(f"ERROR in analysis window: {e}")
                     import traceback
                     traceback.print_exc()
             return handler
         
-        btn.on_clicked(make_handler(strategy, tracker, stock_data_dict, symbols_with_data))
+        btn.on_clicked(make_handler(strategy, tracker, stock_data_dict, symbols_with_data, spy_tracker, sim_id))
     
     results['buttons'] = button_refs
     
     is_running = False
+    
+    # Print telemetry summary
+    print("\n" + "="*70)
+    print("TELEMETRY SUMMARY")
+    print("="*70)
+    telemetry.print_simulation_summary(sim_id)
+    
     print("\nSimulation complete!")
-    plt.show()
+    print("💡 Press CTRL+C to close all windows and exit")
+    print(f"📊 Telemetry saved to: ./telemetry/simulations.db (Simulation ID: {sim_id})")
+    
+    try:
+        plt.show(block=True)
+    except KeyboardInterrupt:
+        print("\n✅ Exiting...")
+        plt.close('all')
+        sys.exit(0)

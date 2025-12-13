@@ -2,7 +2,8 @@
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path('./offline_data/stock_data.db')
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR.parent / "offline_data" / "stock_data.db"
 
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()

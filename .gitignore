@@ -9,3 +9,5 @@
 **/universes/
 **/test_results/
 **.json
+**.csv
+**/telemetry/

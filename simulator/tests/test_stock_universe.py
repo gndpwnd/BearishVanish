@@ -18,10 +18,22 @@ from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load API credentials for Alpaca verification
-load_dotenv()
+# Directory this script lives in
+BASE_DIR = Path(__file__).resolve().parent
+
+# Path to the .env file one level up
+ENV_PATH = BASE_DIR.parent / ".env"
+
+# Load environment variables from that file
+load_dotenv(dotenv_path=ENV_PATH)
+
+# Now read your credentials
 api_key = os.getenv('ALPACA_API_KEY')
 secret_key = os.getenv('ALPACA_SECRET_KEY')
+
+# Optional: warn if missing
+if not api_key or not secret_key:
+    print(f"⚠️  Could not find Alpaca API keys in {ENV_PATH}")
 
 # Output directory
 OUTPUT_DIR = Path('./test_universes')

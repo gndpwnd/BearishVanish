@@ -25,6 +25,11 @@ if the stock goes up 10% in a week monday to monday, sell $10
 if the stock goes down 5% in a month 1st to 1st, buy $5
 if the stock goes up 10% in a month 1st to 1st, sell $10
 
-I want the week long signals to be tied together, and the month signals to be tied, for example don't make a sell-month signal if there is no buy-month signal right before it
+I want the week long signals to be tied together, for example don't make a sell-weeek signal if there is no buy-week signal right before it
 
 now i want to have streaming data handling, instead of hard-coded monday to monday and 15-15, simply take the past 7 days, the past 15 day, and the past 30 days
+
+
+strategy #3 - buying and selling based on percentange increase and decresase over a month
+
+for example don't make a sell-month signal if there is no buy-month signal right before it
