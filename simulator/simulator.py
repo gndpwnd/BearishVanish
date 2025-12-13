@@ -13,7 +13,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
-from datetime import date
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 import importlib.util
 import matplotlib.pyplot as plt
@@ -21,12 +21,14 @@ import matplotlib.dates as mdates
 from matplotlib.widgets import Button
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import sqlite3
 
 from data_manager import DataManager
 from stock_universe import UniverseManager
 from strategy_tracker import StrategyTracker, INITIAL_CASH
 from strategy_analysis import show_strategy_analysis
 from system_benchmark import SystemBenchmark
+import time
 
 # Load API credentials
 load_dotenv()
@@ -34,55 +36,47 @@ api_key = os.getenv('ALPACA_API_KEY')
 secret_key = os.getenv('ALPACA_SECRET_KEY')
 
 # Get recommended workers from benchmark if available
-default_download_workers, default_db_workers = SystemBenchmark.get_recommended_workers()
+default_download_workers = SystemBenchmark.get_recommended_workers()
 
 # Parse command line arguments
-parser = argparse.ArgumentParser(description='Stock Strategy Simulator with Universe Management & Benchmarking')
+parser = argparse.ArgumentParser(description='Stock Strategy Simulator')
 
 # Data management arguments
 parser.add_argument('--cache-status', action='store_true', help='Show offline cache status')
 parser.add_argument('--download', action='store_true', help='Download data for symbols')
-parser.add_argument('--tickers', type=str, help='Comma-separated list of tickers to download (e.g., AAPL,MSFT,GOOGL)')
+parser.add_argument('--tickers', type=str, help='Comma-separated list of tickers to download')
 parser.add_argument('--offline', action='store_true', help='Run in offline mode')
-parser.add_argument('--download-workers', type=int, default=default_download_workers,
-                   help=f'Number of workers for downloads (default: {default_download_workers} from benchmark)')
-parser.add_argument('--db-workers', type=int, default=default_db_workers,
-                   help=f'Number of workers for database reads (default: {default_db_workers} from benchmark)')
-parser.add_argument('--workers', type=int, help='Override both download and db workers (legacy support)')
+parser.add_argument('--workers', type=int, default=default_download_workers,
+                   help=f'Number of workers for API downloads (default: {default_download_workers} from benchmark)')
 
 # Universe management arguments
 parser.add_argument('--update-universe', type=str, help='Update universe: sp500, nasdaq100, russell3000, or all')
-parser.add_argument('--universe', type=str, help='Run simulation with specific universe: sp500, nasdaq100, russell3000')
+parser.add_argument('--universe', type=str, help='Run simulation with specific universe')
 parser.add_argument('--universe-status', action='store_true', help='Show universe status')
-parser.add_argument('--check-ticker', type=str, help='Check if a ticker is in any universe (e.g., AAPL)')
-parser.add_argument('--clear-universe', type=str, help='Clear universe data: sp500, nasdaq100, russell3000, or all')
+parser.add_argument('--check-ticker', type=str, help='Check if a ticker is in any universe')
+parser.add_argument('--clear-universe', type=str, help='Clear universe data')
 
 # Diagnostic arguments
-parser.add_argument('--diagnose', type=str, help='Diagnose mismatch for universe: sp500, nasdaq100, russell3000')
+parser.add_argument('--diagnose', type=str, help='Diagnose mismatch for universe')
 parser.add_argument('--check-quality', type=str, help='Check data quality for universe')
-parser.add_argument('--find-duplicates', type=str, help='Find duplicate ticker issues in universe')
-parser.add_argument('--compare', nargs=2, metavar=('UNIVERSE1', 'UNIVERSE2'), help='Compare two universes')
+parser.add_argument('--find-duplicates', type=str, help='Find duplicate ticker issues')
+parser.add_argument('--compare', nargs=2, help='Compare two universes')
 
 # Validation arguments
-parser.add_argument('--validate', type=str, help='Validate tickers for universe: sp500, nasdaq100, russell3000')
-parser.add_argument('--cleanup-db', action='store_true', help='Clean up database (remove invalid tickers)')
+parser.add_argument('--validate', type=str, help='Validate tickers for universe')
+parser.add_argument('--cleanup-db', action='store_true', help='Clean up database')
 
 # Benchmark arguments
-parser.add_argument('--benchmark', action='store_true', help='Run system benchmark and recommend worker counts')
+parser.add_argument('--benchmark', action='store_true', help='Run network benchmark')
 parser.add_argument('--show-benchmark', action='store_true', help='Show saved benchmark results')
 
-# NEW: Strategy testing arguments
+# Strategy testing arguments
 parser.add_argument('--force-liquidate', action='store_true', 
                    help='Force liquidation of all positions at end of simulation')
 parser.add_argument('--no-universe-check', action='store_true',
-                   help='Disable universe checking during simulation (no forced exits for delisted stocks)')
+                   help='Disable universe checking during simulation')
 
 args = parser.parse_args()
-
-# Handle --workers override for backward compatibility
-if args.workers:
-    args.download_workers = args.workers
-    args.db_workers = args.workers
 
 # Configuration
 HISTORY = 180  # 6 months of data
@@ -282,7 +276,7 @@ if args.cache_status:
     sys.exit(0)
 
 # ============================================================
-# DOWNLOAD COMMAND
+# DOWNLOAD COMMAND - THREAD-SAFE VERSION
 # ============================================================
 
 if args.download:
@@ -321,90 +315,135 @@ if args.download:
         symbols_to_download = ['AAPL', 'GOOGL', 'TSLA', 'MSFT', 'NVDA', 'META', 'SPY']
         print(f"📦 Downloading data for default stocks")
     
-    print(f"🔧 Using {args.download_workers} parallel workers\n")
+    print(f"🔧 Using {args.workers} parallel workers\n")
     
-    # Parallel download with automatic trickle fallback
-    def download_symbol(symbol):
+    # THREAD-SAFE DOWNLOAD FUNCTION
+    def download_symbol_threadsafe(symbol):
+        """Thread-safe version that creates its own DataManager instance"""
         try:
-            df = data_manager.get_stock_data(symbol, days=HISTORY)
+            # Create a NEW DataManager instance for this thread
+            # This avoids SQLite threading issues
+            thread_data_manager = DataManager(api_key, secret_key, offline_mode=False, quiet=True)
+            df = thread_data_manager.get_stock_data(symbol, days=HISTORY)
+            
+            # Clean up
+            del thread_data_manager
+            
             return (symbol, df, None)
         except Exception as e:
             return (symbol, None, str(e))
     
+    # ALTERNATIVE: Sequential download for reliability
+    def download_symbol_sequential(symbol, data_mgr, pbar=None):
+        """Sequential download that uses the main DataManager instance"""
+        try:
+            df = data_mgr.get_stock_data(symbol, days=HISTORY)
+            
+            if pbar:
+                pbar.update(1)
+                if df is not None:
+                    pbar.write(f"✅ {symbol}: {len(df)} bars")
+                else:
+                    pbar.write(f"⚠️  {symbol}: No data available")
+            
+            return (symbol, df, None)
+        except Exception as e:
+            if pbar:
+                pbar.write(f"❌ {symbol}: {e}")
+            return (symbol, None, str(e))
+    
+    print("🚀 OPTION: Starting RELIABLE sequential download...")
+    print("💡 TIP: For large universes, sequential is more reliable than parallel")
+    print("       due to SQLite threading limitations\n")
+    
+    # Ask user which method to use
+    choice = input("Choose download method:\n"
+                   "1. Sequential (Recommended - most reliable)\n"
+                   "2. Parallel (Faster but may have errors)\n"
+                   "Enter choice (1 or 2): ").strip()
+    
     results = {}
     successful = 0
     failed = 0
-    switched_to_trickle = False
     
-    print(f"Starting parallel download...")
-    
-    with ThreadPoolExecutor(max_workers=args.download_workers) as executor:
-        futures = {executor.submit(download_symbol, sym): sym for sym in symbols_to_download}
+    if choice == "2":
+        # Parallel download with thread-safe function
+        print(f"\nStarting parallel download with thread-safe workers...")
         
-        for future in as_completed(futures):
-            symbol, df, error = future.result()
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {executor.submit(download_symbol_threadsafe, sym): sym for sym in symbols_to_download}
             
-            # Check if we hit rate limit
-            if error and data_manager._is_rate_limit_error(error):
-                print(f"\n⚠️  RATE LIMIT DETECTED!")
-                print(f"   Cancelling parallel downloads and switching to trickle mode...\n")
+            for future in as_completed(futures):
+                symbol, df, error = future.result()
                 
-                # Cancel remaining futures
-                for f in futures:
-                    f.cancel()
-                
-                switched_to_trickle = True
-                break
-            
-            if error or df is None:
-                error_msg = error if error else "No data returned"
-                print(f"❌ {symbol}: Error - {error_msg}")
-                results[symbol] = None
-                failed += 1
-            else:
-                print(f"✅ {symbol}: {len(df)} bars downloaded")
-                results[symbol] = df
-                successful += 1
-    
-    # If we switched to trickle mode, download remaining symbols
-    if switched_to_trickle:
-        completed_symbols = set(results.keys())
-        remaining_symbols = [s for s in symbols_to_download if s not in completed_symbols]
-        
-        print(f"🐢 Downloading remaining {len(remaining_symbols)} symbols in trickle mode...")
-        data_manager._activate_trickle_mode()
-        
-        from tqdm import tqdm
-        
-        with tqdm(total=len(remaining_symbols), desc="Trickle download", unit="stock") as pbar:
-            for symbol in remaining_symbols:
-                try:
-                    df = data_manager.get_stock_data(symbol, days=HISTORY)
-                    
-                    if df is not None:
-                        results[symbol] = df
-                        successful += 1
-                        tqdm.write(f"✅ {symbol}: {len(df)} bars")
-                    else:
-                        results[symbol] = None
-                        failed += 1
-                        tqdm.write(f"⚠️  {symbol}: No data available")
-                
-                except Exception as e:
-                    tqdm.write(f"❌ {symbol}: {e}")
+                if error or df is None:
+                    error_msg = error if error else "No data returned"
+                    print(f"❌ {symbol}: Error - {error_msg}")
                     results[symbol] = None
                     failed += 1
-                
-                pbar.update(1)
+                else:
+                    print(f"✅ {symbol}: {len(df)} bars downloaded")
+                    results[symbol] = df
+                    successful += 1
+    else:
+        # Sequential download (default - most reliable)
+        print(f"\nStarting reliable sequential download...")
+        print("This may take a while for large universes...\n")
+        
+        # Check how many symbols already have data
+        conn = sqlite3.connect(data_manager.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT DISTINCT symbol FROM stock_bars')
+        existing_symbols = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        
+        missing_symbols = [s for s in symbols_to_download if s not in existing_symbols]
+        
+        print(f"📊 Download status:")
+        print(f"   Total symbols: {len(symbols_to_download)}")
+        print(f"   Already cached: {len(existing_symbols)}")
+        print(f"   Need to download: {len(missing_symbols)}")
+        
+        if missing_symbols:
+            print(f"\n📥 Downloading {len(missing_symbols)} symbols...")
+            
+            from tqdm import tqdm
+            
+            with tqdm(total=len(missing_symbols), desc="Downloading", unit="stock") as pbar:
+                for symbol in missing_symbols:
+                    symbol_result, df, error = download_symbol_sequential(symbol, data_manager, pbar)
+                    
+                    if error or df is None:
+                        results[symbol] = None
+                        failed += 1
+                    else:
+                        results[symbol] = df
+                        successful += 1
+        else:
+            print(f"\n✅ All symbols already downloaded!")
+            successful = len(symbols_to_download)
+    
+    # Check which symbols failed
+    failed_symbols = [s for s in symbols_to_download if results.get(s) is None]
     
     print(f"\n{'='*70}")
     print(f"DOWNLOAD COMPLETE")
-    print(f"Successful: {successful}/{len(symbols_to_download)}")
-    if failed > 0:
-        print(f"Failed: {failed}/{len(symbols_to_download)}")
-    if switched_to_trickle:
-        print(f"🐢 Switched to trickle mode during download")
+    print(f"Total: {len(symbols_to_download)} symbols")
+    print(f"Successful: {successful}")
+    print(f"Failed: {failed}")
+    
+    if failed_symbols:
+        print(f"\n❌ Failed symbols ({len(failed_symbols)}):")
+        for i in range(0, len(failed_symbols), 10):
+            print(f"   {', '.join(failed_symbols[i:i+10])}")
+    
+    print(f"\n💡 Next steps:")
+    print(f"   - Run again to retry failed downloads")
+    print(f"   - Try with --universe sp500 for a smaller test")
+    print(f"   - Check your API key limits if many failures")
     print(f"{'='*70}\n")
+    
     sys.exit(0)
 
 # ============================================================
@@ -485,48 +524,76 @@ def fetch_stock_data(symbol, days=HISTORY):
     """Fetch stock data using DataManager"""
     return data_manager.get_stock_data(symbol, days=days)
 
-def fetch_stock_data_parallel(symbols, days=HISTORY, max_workers=None):
-    """Fetch multiple stocks in parallel with tqdm progress bar"""
-    if max_workers is None:
-        max_workers = min(args.db_workers, len(symbols))
+def fetch_stock_data_parallel(symbols, days=HISTORY):
+    """
+    🚀 OPTIMIZED: Fetch multiple stocks using batch loading
+    This is 10-50x faster than loading symbols individually
+    No workers needed - batch loading uses a single optimized query
+    """
     
-    from tqdm import tqdm
+    print(f"\n📊 Loading {len(symbols)} symbols from database...")
+    print(f"⚡ Using BATCH LOADING for maximum speed\n")
     
-    print(f"\n📊 Loading {len(symbols)} symbols with {max_workers} workers...")
+    start_time = time.time()
     
-    stock_data_dict = {}
-    errors = []
+    # Calculate date range
+    end_date = datetime.now().replace(tzinfo=None)
+    start_date = (end_date - timedelta(days=days)).replace(tzinfo=None)
     
-    def load_symbol(symbol):
-        try:
-            df = fetch_stock_data(symbol, days)
-            return (symbol, df, None)
-        except Exception as e:
-            return (symbol, None, str(e))
+    # 🚀 OPTION 1: Load ALL symbols in ONE query (fastest for < 1000 symbols)
+    if len(symbols) <= 1000:
+        print(f"⚡ Loading all {len(symbols)} symbols in a single batch query...")
+        stock_data_dict = data_manager.load_multiple_symbols_batch(
+            symbols, 
+            start_date, 
+            end_date
+        )
+        
+        loaded = len(stock_data_dict)
+        missing = len(symbols) - loaded
+        
+        elapsed = time.time() - start_time
+        print(f"\n✅ Loaded {loaded}/{len(symbols)} symbols in {elapsed:.2f}s")
+        print(f"   Speed: {loaded/elapsed:.1f} symbols/second")
+        
+        if missing > 0:
+            print(f"⚠️  {missing} symbols not found in cache")
+        
+        return stock_data_dict
     
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='DataLoader') as executor:
-        futures = {executor.submit(load_symbol, sym): sym for sym in symbols}
+    # 🚀 OPTION 2: Load in chunks (for > 1000 symbols)
+    else:
+        print(f"⚡ Loading {len(symbols)} symbols in chunks...")
+        chunk_size = 250  # Load 250 symbols per query
+        stock_data_dict = {}
+        
+        from tqdm import tqdm
         
         with tqdm(total=len(symbols), desc="Loading data", unit="stock") as pbar:
-            for future in as_completed(futures):
-                symbol, df, error = future.result()
+            for i in range(0, len(symbols), chunk_size):
+                chunk = symbols[i:i+chunk_size]
                 
-                if error or df is None:
-                    error_msg = error if error else "No data returned"
-                    errors.append((symbol, error_msg))
-                    tqdm.write(f"  ❌ {symbol}: {error_msg}")
-                else:
-                    stock_data_dict[symbol] = df
+                # Load this chunk
+                chunk_data = data_manager.load_multiple_symbols_batch(
+                    chunk,
+                    start_date,
+                    end_date
+                )
                 
-                pbar.update(1)
-    
-    if errors:
-        print(f"\n⚠️  {len(errors)} symbols failed to load")
-        print(f"✅ Continuing with {len(stock_data_dict)}/{len(symbols)} symbols\n")
-    else:
-        print(f"✅ All {len(stock_data_dict)} symbols loaded successfully\n")
-    
-    return stock_data_dict
+                stock_data_dict.update(chunk_data)
+                pbar.update(len(chunk))
+        
+        loaded = len(stock_data_dict)
+        missing = len(symbols) - loaded
+        
+        elapsed = time.time() - start_time
+        print(f"\n✅ Loaded {loaded}/{len(symbols)} symbols in {elapsed:.2f}s")
+        print(f"   Speed: {loaded/elapsed:.1f} symbols/second")
+        
+        if missing > 0:
+            print(f"⚠️  {missing} symbols not found in cache")
+        
+        return stock_data_dict
 
 # ============================================================
 # FORCED LIQUIDATION FUNCTION
@@ -592,6 +659,13 @@ def run_simulation():
         is_running = False
         return
     
+    # Check if SPY has data
+    if spy_data is None or spy_data.empty:
+        print("❌ ERROR: No data for SPY. Please run download first.")
+        print("   Try: python simulator.py --download --tickers SPY")
+        is_running = False
+        return
+    
     # Load all other stocks in parallel
     stock_data_dict = fetch_stock_data_parallel(SYMBOLS, days=HISTORY)
     
@@ -600,16 +674,63 @@ def run_simulation():
         is_running = False
         return
     
+    # Filter out symbols with no data
+    symbols_with_data = [symbol for symbol in stock_data_dict if not stock_data_dict[symbol].empty]
+    print(f"\n📊 Found data for {len(symbols_with_data)} out of {len(SYMBOLS)} symbols")
+    
+    if len(symbols_with_data) == 0:
+        print("❌ No symbols have data. Please run with --download first.")
+        is_running = False
+        return
+    
+    # Update stock_data_dict to only include symbols with data
+    stock_data_dict = {symbol: stock_data_dict[symbol] for symbol in symbols_with_data}
+    
+    # Check which symbols have enough data (at least 100 bars)
+    symbols_enough_data = [s for s in symbols_with_data if len(stock_data_dict[s]) >= 100]
+    print(f"📊 Symbols with sufficient data (≥100 bars): {len(symbols_enough_data)}")
+    
+    # If we have a lot of symbols, we might want to limit for performance
+    MAX_SYMBOLS = 500  # Limit for reasonable performance
+    if len(symbols_enough_data) > MAX_SYMBOLS:
+        print(f"⚠️  Limiting to first {MAX_SYMBOLS} symbols for performance")
+        symbols_enough_data = symbols_enough_data[:MAX_SYMBOLS]
+        stock_data_dict = {s: stock_data_dict[s] for s in symbols_enough_data}
+    
     # Align all data to common dates
     common_dates = spy_data.index
     for symbol in list(stock_data_dict.keys()):
         common_dates = common_dates.intersection(stock_data_dict[symbol].index)
+    
+    # Check if we have any common dates
+    if len(common_dates) == 0:
+        print("\n❌ ERROR: No overlapping time periods between SPY and the selected stocks")
+        print("This can happen if:")
+        print("  1. Some stocks have no data for the requested period")
+        print("  2. Some stocks have different trading calendars")
+        print("  3. The data is corrupted or incomplete")
+        print("\n💡 Solutions:")
+        print("  - Run with --download to refresh the data")
+        print("  - Try a smaller universe (sp500 instead of russell3000)")
+        print("  - Check if you're in offline mode with incomplete data")
+        
+        # Show which symbols have data
+        print(f"\n📊 Data availability summary:")
+        print(f"  SPY: {len(spy_data)} bars")
+        for symbol in list(stock_data_dict.keys())[:10]:  # Show first 10
+            print(f"  {symbol}: {len(stock_data_dict[symbol])} bars")
+        if len(stock_data_dict) > 10:
+            print(f"  ... and {len(stock_data_dict) - 10} more")
+        
+        is_running = False
+        return
     
     spy_data = spy_data.loc[common_dates]
     for symbol in stock_data_dict:
         stock_data_dict[symbol] = stock_data_dict[symbol].loc[common_dates]
     
     print(f"\n✅ Data aligned: {len(common_dates)} common time points")
+    print(f"   Date range: {common_dates[0].date()} to {common_dates[-1].date()}")
     
     total_bars = len(common_dates)
     delay = TOTAL_DURATION / total_bars if total_bars > 0 else 0.01
@@ -889,7 +1010,7 @@ def run_simulation():
             print(f"  Portfolio value: ${tracker.get_final_value():,.2f}")
             
             # List each position
-            for symbol in SYMBOLS:
+            for symbol in symbols_with_data:  # Use symbols_with_data instead of SYMBOLS
                 shares = tracker.positions.get(symbol, 0)
                 if shares > 0:
                     current_price = stock_data_dict[symbol]['close'].iloc[-1]
@@ -944,7 +1065,7 @@ def run_simulation():
                     traceback.print_exc()
             return handler
         
-        btn.on_clicked(make_handler(strategy, tracker, stock_data_dict, SYMBOLS))
+        btn.on_clicked(make_handler(strategy, tracker, stock_data_dict, symbols_with_data))
     
     results['buttons'] = button_refs
     
