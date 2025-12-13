@@ -321,9 +321,9 @@ if args.download:
         symbols_to_download = ['AAPL', 'GOOGL', 'TSLA', 'MSFT', 'NVDA', 'META', 'SPY']
         print(f"📦 Downloading data for default stocks")
     
-    print(f"🔧 Using {args.download_workers} parallel workers (from benchmark)\n")
+    print(f"🔧 Using {args.download_workers} parallel workers\n")
     
-    # Parallel download
+    # Parallel download with automatic trickle fallback
     def download_symbol(symbol):
         try:
             df = data_manager.get_stock_data(symbol, days=HISTORY)
@@ -334,14 +334,28 @@ if args.download:
     results = {}
     successful = 0
     failed = 0
+    switched_to_trickle = False
     
-    print(f"Downloading {len(symbols_to_download)} symbols...")
+    print(f"Starting parallel download...")
     
     with ThreadPoolExecutor(max_workers=args.download_workers) as executor:
         futures = {executor.submit(download_symbol, sym): sym for sym in symbols_to_download}
         
         for future in as_completed(futures):
             symbol, df, error = future.result()
+            
+            # Check if we hit rate limit
+            if error and data_manager._is_rate_limit_error(error):
+                print(f"\n⚠️  RATE LIMIT DETECTED!")
+                print(f"   Cancelling parallel downloads and switching to trickle mode...\n")
+                
+                # Cancel remaining futures
+                for f in futures:
+                    f.cancel()
+                
+                switched_to_trickle = True
+                break
+            
             if error or df is None:
                 error_msg = error if error else "No data returned"
                 print(f"❌ {symbol}: Error - {error_msg}")
@@ -352,11 +366,44 @@ if args.download:
                 results[symbol] = df
                 successful += 1
     
+    # If we switched to trickle mode, download remaining symbols
+    if switched_to_trickle:
+        completed_symbols = set(results.keys())
+        remaining_symbols = [s for s in symbols_to_download if s not in completed_symbols]
+        
+        print(f"🐢 Downloading remaining {len(remaining_symbols)} symbols in trickle mode...")
+        data_manager._activate_trickle_mode()
+        
+        from tqdm import tqdm
+        
+        with tqdm(total=len(remaining_symbols), desc="Trickle download", unit="stock") as pbar:
+            for symbol in remaining_symbols:
+                try:
+                    df = data_manager.get_stock_data(symbol, days=HISTORY)
+                    
+                    if df is not None:
+                        results[symbol] = df
+                        successful += 1
+                        tqdm.write(f"✅ {symbol}: {len(df)} bars")
+                    else:
+                        results[symbol] = None
+                        failed += 1
+                        tqdm.write(f"⚠️  {symbol}: No data available")
+                
+                except Exception as e:
+                    tqdm.write(f"❌ {symbol}: {e}")
+                    results[symbol] = None
+                    failed += 1
+                
+                pbar.update(1)
+    
     print(f"\n{'='*70}")
     print(f"DOWNLOAD COMPLETE")
     print(f"Successful: {successful}/{len(symbols_to_download)}")
     if failed > 0:
         print(f"Failed: {failed}/{len(symbols_to_download)}")
+    if switched_to_trickle:
+        print(f"🐢 Switched to trickle mode during download")
     print(f"{'='*70}\n")
     sys.exit(0)
 

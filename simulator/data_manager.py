@@ -1,6 +1,7 @@
 """
-Robust Data Manager with Comprehensive Error Handling
-Gracefully handles API failures, missing data, and network issues
+Enhanced Data Manager with Hybrid Download Model and Smart Retry Logic
+Automatically switches to trickle mode when rate limited
+Provides methods for both single and batch downloads
 """
 
 import os
@@ -11,10 +12,14 @@ from pathlib import Path
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 import time
+import json
 
 OFFLINE_DATA_DIR = Path('./offline_data')
 DB_PATH = OFFLINE_DATA_DIR / 'stock_data.db'
+PROGRESS_FILE = OFFLINE_DATA_DIR / 'download_progress.json'
 
 class DataManager:
     def __init__(self, api_key, secret_key, offline_mode=False, quiet=True):
@@ -38,15 +43,25 @@ class DataManager:
         # Error tracking
         self.api_errors = []
         self.failed_symbols = set()
-        self.retry_count = 3  # Number of retries for failed requests
-        self.retry_delay = 2  # Seconds between retries
+        self.retry_count = 3
+        self.retry_delay = 2
+        
+        # 🆕 TRICKLE MODE SETTINGS
+        self.trickle_mode = False
+        self.trickle_delay = 8  # seconds between requests in trickle mode
+        self.rate_limit_cooldown = 60  # wait 60s after hitting rate limit
+        self.rate_limit_errors = 0
+        self.max_rate_limit_errors = 3  # switch to trickle after 3 rate limit errors
+        
+        # 🆕 BATCH DOWNLOAD SETTINGS
+        self.max_parallel_workers = 4
+        self.download_progress = {}
         
     def _init_database(self):
         """Initialize SQLite database with optimized schema"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Create table with indexed columns for fast queries
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS stock_bars (
                 symbol TEXT NOT NULL,
@@ -62,7 +77,6 @@ class DataManager:
             )
         ''')
         
-        # Create indexes for fast lookups
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_symbol 
             ON stock_bars(symbol)
@@ -73,7 +87,6 @@ class DataManager:
             ON stock_bars(symbol, timestamp)
         ''')
         
-        # Metadata table to track data ranges per symbol
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS symbol_metadata (
                 symbol TEXT PRIMARY KEY,
@@ -106,7 +119,7 @@ class DataManager:
             ''', (symbol, row[0], row[1], row[2], int(datetime.now().timestamp())))
             
     def load_offline_data(self, symbol, start_date=None, end_date=None):
-        """Load cached data for a symbol from SQLite - SILENT"""
+        """Load cached data for a symbol from SQLite"""
         try:
             conn = sqlite3.connect(self.db_path)
             
@@ -127,7 +140,6 @@ class DataManager:
             if df.empty:
                 return None
             
-            # Convert timestamp back to datetime index
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
             df.set_index('timestamp', inplace=True)
             
@@ -140,17 +152,15 @@ class DataManager:
             return None
 
     def save_offline_data(self, symbol, df):
-        """Save data to SQLite database - SILENT with error handling"""
+        """Save data to SQLite database"""
         try:
             symbol = symbol.upper()
             conn = sqlite3.connect(self.db_path)
             
-            # Prepare dataframe for insertion
             df_to_save = df.copy()
             df_to_save['symbol'] = symbol
             df_to_save['timestamp'] = df_to_save.index.astype('int64') // 10**9
             
-            # Ensure we have all required columns
             required_cols = ['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume']
             optional_cols = ['trade_count', 'vwap']
             
@@ -158,14 +168,11 @@ class DataManager:
                 if col not in df_to_save.columns:
                     df_to_save[col] = None
             
-            # Select only the columns we need
             cols_to_save = required_cols + optional_cols
             df_to_save = df_to_save[cols_to_save]
             
-            # Use INSERT OR REPLACE to handle duplicates
             df_to_save.to_sql('stock_bars', conn, if_exists='append', index=False, method='multi')
             
-            # Update metadata
             self._update_metadata(symbol, conn)
             
             conn.commit()
@@ -174,7 +181,6 @@ class DataManager:
             return True
             
         except sqlite3.IntegrityError:
-            # Handle duplicate keys by updating existing records
             try:
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
@@ -214,9 +220,23 @@ class DataManager:
                 conn.close()
             return False
 
+    def _is_rate_limit_error(self, error_msg):
+        """Check if error is a rate limit error"""
+        error_str = str(error_msg).lower()
+        return 'too many requests' in error_str or 'rate limit' in error_str or '429' in error_str
+
+    def _activate_trickle_mode(self):
+        """Activate trickle mode when rate limited"""
+        if not self.trickle_mode:
+            print(f"\n⚠️  RATE LIMIT DETECTED - Activating Trickle Mode")
+            print(f"   Switching to sequential downloads with {self.trickle_delay}s delays")
+            print(f"   Cooling down for {self.rate_limit_cooldown}s first...")
+            time.sleep(self.rate_limit_cooldown)
+            self.trickle_mode = True
+
     def fetch_from_api(self, symbol, start_date, end_date, retry_count=None):
         """
-        Fetch data from Alpaca API with robust error handling and retries
+        Fetch data from Alpaca API with rate limit detection and retry logic
         
         Args:
             symbol: Stock symbol
@@ -238,6 +258,10 @@ class DataManager:
         if isinstance(end_date, pd.Timestamp) and end_date.tz is not None:
             end_date = end_date.tz_localize(None)
         
+        # 🆕 Apply trickle delay if in trickle mode
+        if self.trickle_mode:
+            time.sleep(self.trickle_delay)
+        
         for attempt in range(retry_count):
             try:
                 request_params = StockBarsRequest(
@@ -252,10 +276,8 @@ class DataManager:
                 
                 if df.empty:
                     if attempt < retry_count - 1:
-                        # Retry with shorter date range
                         days_diff = (end_date - start_date).days
                         if days_diff > 30:
-                            # Try with smaller chunks
                             end_date = start_date + timedelta(days=30)
                             time.sleep(self.retry_delay)
                             continue
@@ -264,33 +286,219 @@ class DataManager:
                 if isinstance(df.index, pd.MultiIndex):
                     df = df.xs(symbol, level=0)
                 
-                # Convert to timezone-naive
                 df.index = pd.to_datetime(df.index)
                 if df.index.tz is not None:
                     df.index = df.index.tz_localize(None)
                 
+                # 🆕 Success! Reset rate limit counter if we were having issues
+                if self.rate_limit_errors > 0:
+                    self.rate_limit_errors = max(0, self.rate_limit_errors - 1)
+                
                 return df
                 
             except Exception as e:
-                error_msg = f"API error for {symbol} (attempt {attempt + 1}/{retry_count}): {str(e)}"
+                error_msg = str(e)
                 
+                # 🆕 Check if this is a rate limit error
+                if self._is_rate_limit_error(error_msg):
+                    self.rate_limit_errors += 1
+                    print(f"⚠️  Rate limit hit for {symbol} (error #{self.rate_limit_errors})")
+                    
+                    if self.rate_limit_errors >= self.max_rate_limit_errors:
+                        self._activate_trickle_mode()
+                    
+                    # Wait longer for rate limit errors
+                    wait_time = self.rate_limit_cooldown if not self.trickle_mode else self.trickle_delay
+                    if attempt < retry_count - 1:
+                        print(f"   ⏳ Waiting {wait_time}s before retry...")
+                        time.sleep(wait_time)
+                        continue
+                
+                # Regular error handling
                 if attempt < retry_count - 1:
-                    # Log but continue to next retry
                     if not self.quiet:
-                        print(f"⚠️  {error_msg}, retrying...")
-                    time.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
+                        print(f"⚠️  API error for {symbol} (attempt {attempt + 1}/{retry_count}): {error_msg}, retrying...")
+                    time.sleep(self.retry_delay * (attempt + 1))
                 else:
-                    # Final attempt failed
-                    print(f"❌ {error_msg}")
+                    print(f"❌ API error for {symbol} (attempt {attempt + 1}/{retry_count}): {error_msg}")
                     self.api_errors.append({
                         'symbol': symbol,
-                        'error': str(e),
+                        'error': error_msg,
                         'timestamp': datetime.now()
                     })
                     self.failed_symbols.add(symbol)
                     return None
         
         return None
+    
+    # 🆕 NEW HYBRID DOWNLOAD METHODS
+    
+    def download_symbols_with_hybrid_mode(self, symbols, days=180, max_workers=None, 
+                                          trickle_only=False, session_id=None):
+        """
+        Download multiple symbols with automatic trickle mode switching
+        
+        Args:
+            symbols: List of symbols to download
+            days: Number of days of historical data
+            max_workers: Maximum parallel workers (default: self.max_parallel_workers)
+            trickle_only: If True, use trickle mode from start
+            session_id: Optional session ID for progress tracking
+        
+        Returns:
+            dict: {symbol: DataFrame or None}
+        """
+        if max_workers is None:
+            max_workers = self.max_parallel_workers
+        
+        if trickle_only:
+            # Force trickle mode from start
+            self._activate_trickle_mode()
+            return self._download_in_trickle_mode(symbols, days, session_id)
+        else:
+            # Try parallel first, fall back to trickle if rate limited
+            return self._download_with_parallel_fallback(symbols, days, max_workers, session_id)
+    
+    def _download_with_parallel_fallback(self, symbols, days, max_workers, session_id=None):
+        """
+        Download with parallel execution, automatically falling back to trickle mode
+        """
+        results = {}
+        
+        print(f"\n🚀 Starting parallel download with {max_workers} workers...")
+        print(f"📊 Total symbols: {len(symbols)}\n")
+        
+        def download_symbol(symbol):
+            """Download a single symbol with smart gap detection"""
+            try:
+                df = self.get_stock_data(symbol, days=days)
+                
+                if df is not None and not df.empty:
+                    actual_days = (df.index[-1] - df.index[0]).days
+                    expected_days = days
+                    
+                    if actual_days < expected_days * 0.8:  # Got less than 80% of requested data
+                        return (symbol, df, f"Partial data ({actual_days}/{expected_days} days)")
+                    
+                    return (symbol, df, None)
+                else:
+                    return (symbol, None, "No data available")
+                    
+            except Exception as e:
+                return (symbol, None, str(e))
+        
+        # Use tqdm for progress bar
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='Downloader') as executor:
+            futures = {executor.submit(download_symbol, sym): sym for sym in symbols}
+            
+            with tqdm(total=len(symbols), desc="Downloading", unit="stock") as pbar:
+                for future in as_completed(futures):
+                    symbol, df, error = future.result()
+                    
+                    if error or df is None:
+                        if error and self._is_rate_limit_error(error):
+                            # Rate limit hit! Cancel remaining futures and switch to trickle
+                            tqdm.write(f"\n⚠️  RATE LIMIT DETECTED! Cancelling parallel downloads...")
+                            
+                            # Cancel remaining futures
+                            for f in futures:
+                                f.cancel()
+                            
+                            # Break out of this loop
+                            pbar.close()
+                            
+                            # Get list of symbols that weren't completed
+                            completed_symbols = set(results.keys())
+                            remaining_symbols = [s for s in symbols if s not in completed_symbols]
+                            
+                            print(f"🐢 Switching to trickle mode for remaining {len(remaining_symbols)} symbols...")
+                            
+                            # Switch to trickle mode
+                            self._activate_trickle_mode()
+                            
+                            # Download remaining in trickle mode
+                            trickle_results = self._download_in_trickle_mode(
+                                remaining_symbols, 
+                                days, 
+                                session_id
+                            )
+                            results.update(trickle_results)
+                            break
+                        else:
+                            # Regular error, not rate limit
+                            error_msg = error if error else "No data returned"
+                            tqdm.write(f"  ❌ {symbol}: {error_msg}")
+                            results[symbol] = None
+                    else:
+                        # Success!
+                        results[symbol] = df
+                        
+                        # Show data range if we got partial data
+                        if "Partial data" in (error or ""):
+                            actual_days = (df.index[-1] - df.index[0]).days
+                            tqdm.write(f"  ⚠️  {symbol}: {actual_days}/{days} days (partial)")
+                        else:
+                            tqdm.write(f"  ✅ {symbol}: {len(df)} bars ({days} days)")
+                    
+                    pbar.update(1)
+        
+        return results
+    
+    def _download_in_trickle_mode(self, symbols, days, session_id=None):
+        """
+        Download in trickle mode (sequential with delays)
+        """
+        results = {}
+        
+        print(f"\n🐢 TRICKLE MODE ACTIVE")
+        print(f"   Downloading {len(symbols)} symbols sequentially")
+        print(f"   Delay: {self.trickle_delay}s between requests\n")
+        
+        with tqdm(total=len(symbols), desc="Trickle download", unit="stock") as pbar:
+            for symbol in symbols:
+                try:
+                    df = self.get_stock_data(symbol, days=days)
+                    
+                    if df is not None and not df.empty:
+                        actual_days = (df.index[-1] - df.index[0]).days
+                        
+                        if actual_days < days * 0.8:  # Got less than 80% of requested data
+                            tqdm.write(f"  ⚠️  {symbol}: {actual_days}/{days} days (partial)")
+                        else:
+                            tqdm.write(f"  ✅ {symbol}: {len(df)} bars ({days} days)")
+                        
+                        results[symbol] = df
+                    else:
+                        tqdm.write(f"  ❌ {symbol}: No data available")
+                        results[symbol] = None
+                
+                except Exception as e:
+                    error_msg = str(e)
+                    tqdm.write(f"  ❌ {symbol}: {error_msg}")
+                    results[symbol] = None
+                
+                pbar.update(1)
+        
+        return results
+    
+    def save_download_progress(self, symbols, days, results, filename='download_progress.json'):
+        """Save download progress to file"""
+        progress = {
+            'symbols': symbols,
+            'days': days,
+            'results': {k: (v is not None) for k, v in results.items()},
+            'timestamp': datetime.now().isoformat(),
+            'successful': sum(1 for v in results.values() if v is not None),
+            'total': len(symbols)
+        }
+        
+        progress_file = self.offline_data_dir / filename
+        with open(progress_file, 'w') as f:
+            json.dump(progress, f, indent=2)
+        
+        return progress_file
+    
+    # EXISTING METHODS (keep as is, just adding new functionality)
     
     def get_data_range(self, symbol):
         """Get the date range of cached data for a symbol"""
@@ -319,8 +527,7 @@ class DataManager:
             return None
     
     def find_gaps(self, symbol, start_date, end_date):
-        """Identify gaps in the data using metadata (very fast)"""
-        # Ensure timezone-naive dates
+        """Identify gaps in the data using metadata"""
         if isinstance(start_date, pd.Timestamp) and start_date.tz is not None:
             start_date = start_date.tz_localize(None)
         if isinstance(end_date, pd.Timestamp) and end_date.tz is not None:
@@ -335,13 +542,11 @@ class DataManager:
         df_start = data_range['start']
         df_end = data_range['end']
         
-        # Gap before existing data (only if significant - more than 1 day)
         if start_date < df_start - timedelta(days=1):
             gap_end = df_start - timedelta(hours=1)
             if gap_end > start_date:
                 gaps.append((start_date, gap_end))
         
-        # Gap after existing data (only if significant - more than 1 day)
         if end_date > df_end + timedelta(days=1):
             gap_start = df_end + timedelta(hours=1)
             if end_date > gap_start:
@@ -351,22 +556,20 @@ class DataManager:
     
     def get_stock_data(self, symbol, days=180):
         """
-        Main method to get stock data - SILENT MODE with robust error handling
+        Main method to get stock data with automatic trickle mode
         
         Returns:
             DataFrame if successful
-            None if data unavailable (graceful failure)
+            None if data unavailable
         """
         try:
             symbol = symbol.upper()
             end_date = datetime.now().replace(tzinfo=None)
             start_date = (end_date - timedelta(days=days)).replace(tzinfo=None)
             
-            # Check if we have complete data using metadata (very fast)
             data_range = self.get_data_range(symbol)
             
             if data_range:
-                # Use a 3-day buffer to account for weekends/holidays
                 buffer = timedelta(days=3)
                 coverage_start = data_range['start'] - buffer
                 coverage_end = data_range['end'] + buffer
@@ -374,23 +577,19 @@ class DataManager:
                 if coverage_start <= start_date and coverage_end >= end_date:
                     return self.load_offline_data(symbol, start_date, end_date)
             
-            # Find gaps that need to be filled
             gaps = self.find_gaps(symbol, start_date, end_date)
             
             if not gaps:
                 return self.load_offline_data(symbol, start_date, end_date)
             
-            # In offline mode, return None instead of raising
             if self.offline_mode:
                 print(f"⚠️  {symbol}: Missing data in offline mode")
                 return None
             
-            # Download missing gaps
-            if not self.quiet:
+            if not self.quiet and not self.trickle_mode:
                 print(f"📥 {symbol}: Downloading {len(gaps)} gap(s)...")
             
             for gap_start, gap_end in gaps:
-                # Skip tiny gaps
                 if (gap_end - gap_start).total_seconds() < 7200:
                     continue
                     
@@ -398,57 +597,15 @@ class DataManager:
                 if gap_data is not None:
                     self.save_offline_data(symbol, gap_data)
                 else:
-                    # API failed but we can still try to use partial data
                     print(f"⚠️  {symbol}: Partial data available")
             
-            # Load and return the complete data (or whatever we have)
             return self.load_offline_data(symbol, start_date, end_date)
             
         except Exception as e:
             print(f"❌ Unexpected error for {symbol}: {e}")
             return None
 
-    def download_all_data(self, symbols, days=180):
-        """
-        Convenience method to download data for multiple symbols with error handling
-        
-        Returns:
-            dict: {symbol: DataFrame or None}
-        """
-        print(f"\n{'='*60}")
-        print(f"DOWNLOADING DATA FOR {len(symbols)} SYMBOLS")
-        print(f"{'='*60}\n")
-        
-        results = {}
-        successful = 0
-        failed = 0
-        
-        for symbol in symbols:
-            try:
-                df = self.get_stock_data(symbol, days)
-                if df is not None:
-                    results[symbol] = df
-                    successful += 1
-                    if not self.quiet:
-                        print(f"✅ {symbol}: {len(df)} bars")
-                else:
-                    results[symbol] = None
-                    failed += 1
-                    print(f"⚠️  {symbol}: No data available")
-            except Exception as e:
-                print(f"❌ {symbol}: Error - {e}")
-                results[symbol] = None
-                failed += 1
-        
-        print(f"\n{'='*60}")
-        print(f"DOWNLOAD COMPLETE")
-        print(f"✅ Successful: {successful}/{len(symbols)}")
-        if failed > 0:
-            print(f"⚠️  Failed/Unavailable: {failed}/{len(symbols)}")
-        print(f"{'='*60}\n")
-        
-        return results
-    
+    # Keep all other methods (list_cached_symbols, print_cache_status, etc.)
     def list_cached_symbols(self):
         """List all symbols with cached data"""
         try:
@@ -482,7 +639,6 @@ class DataManager:
         try:
             cached = self.list_cached_symbols()
             
-            # Get database size
             db_size_mb = self.db_path.stat().st_size / (1024 * 1024) if self.db_path.exists() else 0
             
             print(f"\n{'='*60}")
@@ -496,7 +652,7 @@ class DataManager:
             if cached:
                 print(f"{'Symbol':<10} {'Bars':<10} {'Date Range'}")
                 print(f"{'-'*60}")
-                for item in cached[:20]:  # Show first 20
+                for item in cached[:20]:
                     print(f"{item['symbol']:<10} {item['bars']:<10} {item['date_range']}")
                 
                 if len(cached) > 20:
@@ -509,7 +665,7 @@ class DataManager:
             print(f"❌ Error printing cache status: {e}")
     
     def vacuum_database(self):
-        """Optimize database (reclaim space and improve performance)"""
+        """Optimize database"""
         try:
             print("Optimizing database...")
             conn = sqlite3.connect(self.db_path)
@@ -540,7 +696,7 @@ class DataManager:
         print(f"Failed symbols: {len(self.failed_symbols)}")
         print(f"\nRecent errors:")
         
-        for error in self.api_errors[-10:]:  # Show last 10
+        for error in self.api_errors[-10:]:
             print(f"  {error['timestamp'].strftime('%H:%M:%S')} - {error['symbol']}: {error['error'][:50]}")
         
         print(f"\n{'='*60}\n")

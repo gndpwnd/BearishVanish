@@ -18,10 +18,6 @@
 
 - try to figure out how to minimize losses in current strategies while maximizing profits
 
-- need to "trickle market data" when getting "to many requests" so can run overnight and get more market data.
-    - need to have a background process constantly updating known universes and all stock information for configured number of days regardless if the user wants to update them or not so don't get rate limited...
-    - want to be able to run this universe trickle individually as well with a default of 180 past days from current day, so can run overnight then run simulations in the morning. would be very useful
-
 - then also fix these errors:
 
 ❌ Error generating markdown: 'StrategyTracker' object has no attribute 'get_portfolio_beta'
