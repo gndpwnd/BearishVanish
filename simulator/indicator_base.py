@@ -486,55 +486,123 @@ def benchmark_indicator_performance(data: pd.DataFrame, num_runs: int = 10) -> D
     
     return results
 
-    def precompute_all_indicators(data: pd.DataFrame, 
+
+# Line 604 in indicator_base.py - replace this function:
+def precompute_all_indicators(data: pd.DataFrame, 
                               required_indicators: List[str],
                               use_numba: bool = True) -> pd.DataFrame:
-        """
-        Pre-compute all indicators ONCE before simulation starts
-        This is the #1 performance optimization
+    """
+    Pre-compute all indicators ONCE before simulation starts
+    This is the #1 performance optimization
+    
+    Args:
+        data: OHLCV DataFrame
+        required_indicators: List like ['sma_20', 'rsi_14', 'macd_12_26_9']
+        use_numba: Enable Numba JIT compilation
         
-        Args:
-            data: OHLCV DataFrame
-            required_indicators: List like ['sma_20', 'rsi_14', 'macd_12_26_9']
-            use_numba: Enable Numba JIT compilation
-            
-        Returns:
-            DataFrame with all indicator columns added
-        """
-        enriched_data = data.copy()
+    Returns:
+        DataFrame with all indicator columns added
+    """
+    enriched_data = data.copy()
+    
+    print(f"  📊 Pre-computing {len(required_indicators)} indicators...")
+    start_time = time.time()
+    
+    # Parse indicator specifications
+    for indicator_spec in required_indicators:
+        parts = indicator_spec.split('_')
+        indicator_name = parts[0]
         
-        print(f"  📊 Pre-computing {len(required_indicators)} indicators...")
-        start_time = time.time()
+        # Extract parameters from name (e.g., 'sma_20' → period=20)
+        params = {}
+        if len(parts) > 1:
+            try:
+                params['period'] = int(parts[1])
+            except ValueError:
+                pass
         
-        # Parse indicator specifications
-        for indicator_spec in required_indicators:
-            parts = indicator_spec.split('_')
-            indicator_name = parts[0]
-            
-            # Extract parameters from name (e.g., 'sma_20' → period=20)
-            params = {}
-            if len(parts) > 1:
-                try:
-                    params['period'] = int(parts[1])
-                except ValueError:
-                    pass
-            
-            # Call appropriate indicator function
-            if indicator_name == 'sma':
-                enriched_data[indicator_spec] = calculate_sma(
-                    data, params.get('period', 20), use_numba
-                )
-            elif indicator_name == 'ema':
-                enriched_data[indicator_spec] = calculate_ema(
-                    data, params.get('period', 20), use_numba
-                )
-            elif indicator_name == 'rsi':
-                enriched_data[indicator_spec] = calculate_rsi(
-                    data, params.get('period', 14), use_numba
-                )
-            # ... add more indicators
+        # Handle specific parameter extraction for different indicators
+        if indicator_name == 'macd' and len(parts) >= 4:
+            try:
+                params['fast_period'] = int(parts[1])
+                params['slow_period'] = int(parts[2])
+                params['signal_period'] = int(parts[3])
+            except:
+                pass
+        elif indicator_name == 'stochastic' and len(parts) >= 4:
+            try:
+                params['period'] = int(parts[1])
+                params['smooth_k'] = int(parts[2])
+                params['smooth_d'] = int(parts[3])
+            except:
+                pass
+        elif indicator_name == 'bollinger' and len(parts) >= 2:
+            try:
+                params['period'] = int(parts[1])
+                if len(parts) >= 3:
+                    params['std_dev'] = float(parts[2])
+                else:
+                    params['std_dev'] = 2.0
+            except:
+                pass
         
-        elapsed = (time.time() - start_time) * 1000
-        print(f"  ✅ Indicators computed in {elapsed:.1f}ms")
-        
-        return enriched_data
+        # Call appropriate indicator function
+        if indicator_name == 'sma':
+            enriched_data[indicator_spec] = calculate_sma(
+                data, params.get('period', 20), use_numba
+            )
+        elif indicator_name == 'ema':
+            enriched_data[indicator_spec] = calculate_ema(
+                data, params.get('period', 20), use_numba
+            )
+        elif indicator_name == 'rsi':
+            enriched_data[indicator_spec] = calculate_rsi(
+                data, params.get('period', 14), use_numba
+            )
+        elif indicator_name == 'macd':
+            macd_line, signal_line, histogram = calculate_macd(
+                data, 
+                params.get('fast_period', 12),
+                params.get('slow_period', 26),
+                params.get('signal_period', 9),
+                use_numba
+            )
+            enriched_data[f'{indicator_spec}_line'] = macd_line
+            enriched_data[f'{indicator_spec}_signal'] = signal_line
+            enriched_data[f'{indicator_spec}_hist'] = histogram
+        elif indicator_name == 'bollinger' or indicator_name == 'bollinger_bands':
+            upper, middle, lower = calculate_bollinger_bands(
+                data,
+                params.get('period', 20),
+                params.get('std_dev', 2.0),
+                use_numba
+            )
+            enriched_data[f'{indicator_spec}_upper'] = upper
+            enriched_data[f'{indicator_spec}_middle'] = middle
+            enriched_data[f'{indicator_spec}_lower'] = lower
+        elif indicator_name == 'atr':
+            enriched_data[indicator_spec] = calculate_atr(
+                data, params.get('period', 14), use_numba
+            )
+        elif indicator_name == 'relative_volume':
+            enriched_data[indicator_spec] = calculate_relative_volume(
+                data, params.get('period', 20), use_numba
+            )
+        elif indicator_name == 'stochastic':
+            k_line, d_line = calculate_stochastic(
+                data,
+                params.get('period', 14),
+                params.get('smooth_k', 3),
+                params.get('smooth_d', 3),
+                use_numba
+            )
+            enriched_data[f'{indicator_spec}_k'] = k_line
+            enriched_data[f'{indicator_spec}_d'] = d_line
+    
+    elapsed = (time.time() - start_time) * 1000
+    print(f"  ✅ Indicators computed in {elapsed:.1f}ms")
+    
+    # Fill NaN values - FIXED: Use ffill() and bfill() instead of fillna(method=...)
+    enriched_data = enriched_data.ffill().bfill()
+    
+    return enriched_data

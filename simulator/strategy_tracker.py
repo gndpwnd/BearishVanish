@@ -11,7 +11,8 @@ import pandas as pd
 INITIAL_CASH = 100000  # Start with $100k
 
 class StrategyTracker:
-    def __init__(self, strategy_name, initial_cash=INITIAL_CASH, position_size_pct=0.20, max_positions=10):
+    # In strategy_tracker.py - update the __init__ method:
+    def __init__(self, strategy_name, initial_cash=INITIAL_CASH, position_size_pct=0.20, max_positions=10, verbose=False):
         """
         Initialize Strategy Tracker with flexible parameters
         
@@ -20,12 +21,14 @@ class StrategyTracker:
             initial_cash: Starting capital amount
             position_size_pct: Percentage of portfolio per position (default 20%)
             max_positions: Maximum concurrent positions (default 10, was 5)
+            verbose: Whether to print trade details (default False)
         """
         self.name = strategy_name
         self.initial_cash = initial_cash
         self.cash = initial_cash
         self.position_size_pct = position_size_pct
         self.max_positions = max_positions
+        self.verbose = verbose  # Add this line
         
         # Store strategy configuration for telemetry
         self.strategy_config = {
@@ -41,11 +44,12 @@ class StrategyTracker:
         
         # Track position allocations
         self.position_values = {}  # symbol: current value
-        
+
     def get_current_position_count(self):
         """Count non-zero positions"""
         return sum(1 for shares in self.positions.values() if shares > 0)
     
+    # In strategy_tracker.py - update the execute_trade method:
     def execute_trade(self, symbol, signal, price, date, force=False, volume=None):
         """
         Execute trade with SMART POSITION SIZING and return success status
@@ -59,7 +63,8 @@ class StrategyTracker:
                 if current_positions >= self.max_positions:
                     # Only block if opening a NEW position
                     if symbol not in self.positions or self.positions.get(symbol, 0) == 0:
-                        print(f"❌ {self.name}: BUY {symbol} BLOCKED - Max positions reached ({current_positions}/{self.max_positions})")
+                        if self.verbose:  # Add verbose check
+                            print(f"❌ {self.name}: BUY {symbol} BLOCKED - Max positions reached ({current_positions}/{self.max_positions})")
                         return False  # Blocked by max positions
             
             # Calculate allocation based on PORTFOLIO value, not just cash
@@ -72,14 +77,16 @@ class StrategyTracker:
             allocation = min(allocation, self.cash)
             
             if allocation < 100:  # Minimum position size
-                print(f"❌ {self.name}: BUY {symbol} BLOCKED - Insufficient allocation (${allocation:.2f} < $100)")
+                if self.verbose:  # Add verbose check
+                    print(f"❌ {self.name}: BUY {symbol} BLOCKED - Insufficient allocation (${allocation:.2f} < $100)")
                 return False
                 
             shares = round(allocation / price, 2)  # Fractional shares
             actual_cost = shares * price
             
             if actual_cost > self.cash:
-                print(f"❌ {self.name}: BUY {symbol} BLOCKED - Insufficient cash (${actual_cost:.2f} > ${self.cash:.2f})")
+                if self.verbose:  # Add verbose check
+                    print(f"❌ {self.name}: BUY {symbol} BLOCKED - Insufficient cash (${actual_cost:.2f} > ${self.cash:.2f})")
                 return False
                 
             self.positions[symbol] = self.positions.get(symbol, 0) + shares
@@ -96,7 +103,9 @@ class StrategyTracker:
                 'forced': force,
                 'volume': volume  # NEW: Store volume
             })
-            print(f"✅ {self.name}: BOUGHT {shares:.2f} shares of {symbol} at ${price:.2f} (${actual_cost:.2f})")
+            
+            if self.verbose:  # Add verbose check
+                print(f"✅ {self.name}: BOUGHT {shares:.2f} shares of {symbol} at ${price:.2f} (${actual_cost:.2f})")
             return True  # Trade succeeded
                     
         elif signal == 'SELL' and self.positions.get(symbol, 0) > 0:
@@ -118,11 +127,14 @@ class StrategyTracker:
                 'forced': force,
                 'volume': volume  # NEW: Store volume
             })
-            print(f"✅ {self.name}: SOLD {shares:.2f} shares of {symbol} at ${price:.2f} (${proceeds:.2f})")
+            
+            if self.verbose:  # Add verbose check
+                print(f"✅ {self.name}: SOLD {shares:.2f} shares of {symbol} at ${price:.2f} (${proceeds:.2f})")
             return True  # Trade succeeded
         
         elif signal == 'SELL' and self.positions.get(symbol, 0) <= 0:
-            print(f"❌ {self.name}: SELL {symbol} BLOCKED - No position to sell")
+            if self.verbose:  # Add verbose check
+                print(f"❌ {self.name}: SELL {symbol} BLOCKED - No position to sell")
             return False
             
         return False  # No trade executed

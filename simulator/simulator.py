@@ -12,11 +12,19 @@ from tqdm import tqdm
 import multiprocessing as mp
 from pathlib import Path
 import json
+import importlib.util
+import sys
 
-from strategy_base import StrategyBase
 from strategy_tracker import StrategyTracker
 from simulation_telemetry import SimulationTelemetry, BatchBuffer
-from indicator_loader import get_indicator_library
+
+def print_simulation_progress(completed, total, current_strategy=None, current_symbol=None):
+    """Print clean progress updates"""
+    progress_pct = (completed / total * 100) if total > 0 else 0
+    print(f"\r📊 Progress: {completed}/{total} ({progress_pct:.1f}%)", end="")
+    if current_strategy and current_symbol:
+        print(f" | Current: {current_strategy} on {current_symbol}", end="")
+    sys.stdout.flush()
 
 # ============================================================
 # INDICATOR PRE-COMPUTATION
@@ -24,8 +32,7 @@ from indicator_loader import get_indicator_library
 
 def precompute_indicators_for_symbol(symbol: str, 
                                      data: pd.DataFrame,
-                                     required_indicators: List[str],
-                                     indicator_library) -> pd.DataFrame:
+                                     required_indicators: List[str]) -> pd.DataFrame:
     """
     Pre-compute all indicators for a symbol ONCE
     This is the key optimization - calculate before simulation loop
@@ -33,61 +40,17 @@ def precompute_indicators_for_symbol(symbol: str,
     if not required_indicators:
         return data
     
-    # Check if indicator library is available
-    if indicator_library is None:
-        print(f"  ⚠️  No indicator library for {symbol}, skipping pre-computation")
-        return data
-    
     print(f"  Pre-computing {len(required_indicators)} indicators for {symbol}...")
     start_time = time.time()
     
-    # Parse indicator configurations
-    indicators_config = {}
-    for indicator_spec in required_indicators:
-        if '_' in indicator_spec:
-            parts = indicator_spec.split('_')
-            indicator_name = parts[0]
-            
-            # Extract period
-            try:
-                period = int(parts[1])
-                params = {'period': period}
-                
-                # Handle special cases
-                if indicator_name == 'bollinger':
-                    params['std_dev'] = 2.0
-                    indicator_name = 'bollinger_bands'
-                elif indicator_name == 'macd':
-                    # Default MACD parameters
-                    params = {'fast_period': 12, 'slow_period': 26, 'signal_period': 9}
-                elif indicator_name == 'stochastic':
-                    params = {'period': 14, 'smooth_k': 3, 'smooth_d': 3}
-                
-                indicators_config[indicator_name] = params
-            except (ValueError, IndexError):
-                # Not a parameterized indicator
-                indicators_config[indicator_spec] = {}
-    
-    # Use indicator_base's optimized function
+    # Use the optimized function from indicator_base
     try:
-        from indicator_base import create_indicator_dataframe
-        enriched_data = create_indicator_dataframe(data, indicators_config)
-    except ImportError:
-        # Fallback: compute indicators individually
-        enriched_data = data.copy()
-        for indicator_name, params in indicators_config.items():
-            if indicator_name in indicator_library._functions:
-                try:
-                    result = indicator_library._functions[indicator_name](data, **params)
-                    if isinstance(result, tuple):
-                        for i, arr in enumerate(result):
-                            suffix = ['', '_signal', '_hist'][i] if indicator_name == 'macd' else ['_upper', '_middle', '_lower'][i]
-                            col_name = f"{indicator_name}{suffix}"
-                            enriched_data[col_name] = arr
-                    else:
-                        enriched_data[indicator_name] = result
-                except Exception as e:
-                    print(f"    ⚠️  Error computing {indicator_name}: {e}")
+        from indicator_base import precompute_all_indicators
+        enriched_data = precompute_all_indicators(data, required_indicators, use_numba=True)
+    except ImportError as e:
+        print(f"    ⚠️  Could not import precompute_all_indicators: {e}")
+        print(f"    Using original data without pre-computation")
+        enriched_data = data
     
     elapsed = (time.time() - start_time) * 1000
     print(f"  ✅ {symbol} indicators computed in {elapsed:.1f}ms")
@@ -95,27 +58,82 @@ def precompute_indicators_for_symbol(symbol: str,
     return enriched_data
 
 # ============================================================
+# STRATEGY LOADER (FIXED for multiprocessing)
+# ============================================================
+
+def load_strategy_by_name(strategy_name: str, strategy_config: Dict) -> Any:
+    """
+    Load a strategy by name - creates fresh instance for each process
+    This avoids pickle issues with multiprocessing
+    """
+    # Map strategy names to files
+    strategy_map = {
+        "500 Intersection": "strategy_500_intersection.py",
+        "Weekly Threshold": "strategy_WAM.py",
+        "Momentum Example": "strategy_momentum_example.py",
+    }
+    
+    if strategy_name not in strategy_map:
+        raise ValueError(f"Unknown strategy: {strategy_name}")
+    
+    strategy_file = Path(f"./strategies/{strategy_map[strategy_name]}")
+    
+    try:
+        # Load strategy module
+        spec = importlib.util.spec_from_file_location(
+            f"strategy_{strategy_name.lower().replace(' ', '_')}",
+            strategy_file
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        
+        if not hasattr(module, 'Strategy'):
+            raise ValueError(f"No Strategy class in {strategy_file}")
+        
+        # Create new instance with config
+        from strategy_base import StrategyConfig
+        config = StrategyConfig(
+            name=strategy_name,
+            initial_capital=strategy_config.get('initial_capital', 100000),
+            position_size_pct=strategy_config.get('position_size_pct', 0.10),
+            max_positions=strategy_config.get('max_positions', 10)
+        )
+        
+        return module.Strategy(config=config)
+        
+    except Exception as e:
+        print(f"❌ Error loading strategy {strategy_name}: {e}")
+        raise
+
+# ============================================================
 # OPTIMIZED SIMULATION FUNCTIONS
 # ============================================================
 
-def run_single_strategy_on_symbol(strategy, 
-                                  symbol: str,
-                                  stock_data: pd.DataFrame,
-                                  spy_data: pd.DataFrame,
-                                  args,
-                                  telemetry: SimulationTelemetry = None,
-                                  buffer: BatchBuffer = None) -> Dict:
+def run_single_strategy_on_symbol(strategy_name: str,  # CHANGED: Pass name, not instance
+                                 strategy_config: Dict,
+                                 symbol: str,
+                                 stock_data: pd.DataFrame,
+                                 spy_data: pd.DataFrame,
+                                 args,
+                                 telemetry: SimulationTelemetry = None,
+                                 buffer: BatchBuffer = None) -> Dict:
     """
     Run a single strategy on a single symbol
     This function is parallelized across all strategy/symbol combinations
+    
+    Note: Strategy instance is created fresh in each process to avoid pickle issues
     """
     try:
+        # Load strategy fresh for this process
+        strategy = load_strategy_by_name(strategy_name, strategy_config)
+        
         # Create strategy tracker
         tracker = StrategyTracker(
             strategy.name,
-            initial_capital=strategy.initial_capital,
+            initial_cash=strategy.initial_capital,  # Changed from initial_capital to initial_cash
             position_size_pct=strategy.position_size_pct,
-            max_positions=strategy.max_positions
+            max_positions=strategy.max_positions,
+            verbose=False
         )
         
         # Store strategy configuration in tracker for telemetry
@@ -343,16 +361,18 @@ def run_single_strategy_on_symbol(strategy,
         }
         
     except Exception as e:
-        print(f"❌ Error: {strategy.name} on {symbol}: {e}")
+        print(f"❌ Error: {strategy_name} on {symbol}: {e}")
+        import traceback
+        traceback.print_exc()
         return {
-            'strategy': strategy.name,
+            'strategy': strategy_name,
             'symbol': symbol,
             'error': str(e),
             'success': False
         }
 
 # ============================================================
-# MAIN SIMULATION FUNCTION
+# MAIN SIMULATION FUNCTION (UPDATED)
 # ============================================================
 
 def run_simulation(strategies, symbols, data_manager, universe_manager, args):
@@ -360,7 +380,13 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     Main simulation with pre-computation and parallel processing
     """
     # Initialize systems
-    indicator_library = get_indicator_library()
+    try:
+        from indicator_loader import get_indicator_library
+        indicator_library = get_indicator_library()
+    except ImportError:
+        print("⚠️  Could not load indicator library")
+        indicator_library = None
+    
     telemetry = SimulationTelemetry()
     buffer = BatchBuffer(telemetry, batch_size=1000)
     
@@ -432,59 +458,86 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     for strategy in strategies:
         strategy.set_indicator_library(indicator_library)
     
-    # Pre-compute indicators in parallel
     enriched_data_dict = {}
     
-    # Create chunks for parallel pre-computation
-    symbol_chunks = [list(data_dict.keys())[i:i+parallel_workers] 
-                     for i in range(0, len(data_dict), parallel_workers)]
-    
-    for chunk in tqdm(symbol_chunks, desc="Pre-computing indicators"):
-        for symbol in chunk:
-            if symbol in data_dict:
-                enriched_data = precompute_indicators_for_symbol(
-                    symbol,
-                    data_dict[symbol],
-                    list(all_required_indicators),
-                    indicator_library
-                )
-                enriched_data_dict[symbol] = enriched_data
+    # Pre-compute indicators for each symbol
+    for symbol in tqdm(list(data_dict.keys()), desc="Pre-computing indicators"):
+        if symbol in data_dict:
+            enriched_data = precompute_indicators_for_symbol(
+                symbol,
+                data_dict[symbol],
+                list(all_required_indicators)
+            )
+            enriched_data_dict[symbol] = enriched_data
     
     print(f"✅ All indicators pre-computed\n")
     
     # STEP 4: Run simulations in parallel
     print("🚀 Running simulations...")
     
-    # Create all strategy/symbol combinations
+    # Create tasks with strategy CONFIGS instead of instances
     tasks = []
     for strategy in strategies:
+        strategy_config = strategy.get_config()  # Get serializable config
         for symbol in symbols:
             if symbol in enriched_data_dict:
-                tasks.append((strategy, symbol))
+                tasks.append((strategy.name, strategy_config, symbol))
     
     print(f"  Total simulations: {len(tasks)}")
     
-    # Run simulations in parallel
     results = {}
     rejected_counts = {}
     
     start_time = time.time()
     
-    with ProcessPoolExecutor(max_workers=parallel_workers) as executor:
-        # Submit all tasks
-        futures = {
-            executor.submit(
-                run_single_strategy_on_symbol,
-                strategy, symbol, enriched_data_dict[symbol], spy_data, args
-            ): (strategy.name, symbol)
-            for strategy, symbol in tasks
-        }
+    # Use sequential processing first for debugging
+    # Switch to parallel once working
+    use_parallel = False  # Set to False for debugging
+    
+    if use_parallel:
+        # PARALLEL PROCESSING
+        with ProcessPoolExecutor(max_workers=parallel_workers) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(
+                    run_single_strategy_on_symbol,
+                    strategy_name, strategy_config, symbol, 
+                    enriched_data_dict[symbol], spy_data, args
+                ): (strategy_name, symbol)
+                for strategy_name, strategy_config, symbol in tasks
+            }
+            
+            # Collect results with progress bar
+            with tqdm(total=len(futures), desc="Simulating") as pbar:
+                for future in as_completed(futures):
+                    strategy_name, symbol = futures[future]
+                    result = future.result()
+                    
+                    if result['success']:
+                        if strategy_name not in results:
+                            results[strategy_name] = {}
+                        results[strategy_name][symbol] = result['tracker']
+                        rejected_counts[strategy_name] = rejected_counts.get(strategy_name, 0) + result['rejected_trades']
+                    else:
+                        print(f"\n⚠️  Failed: {strategy_name} on {symbol}: {result.get('error', 'Unknown error')}")
+                    
+                    pbar.update(1)
+    else:
+        # SEQUENTIAL PROCESSING (for debugging)
+        print(f"\n📈 Running {len(tasks)} simulations sequentially...")
+        completed_simulations = 0
         
-        # Collect results with progress bar
-        with tqdm(total=len(futures), desc="Simulating") as pbar:
-            for future in as_completed(futures):
-                strategy_name, symbol = futures[future]
-                result = future.result()
+        with tqdm(total=len(tasks), desc="Simulating") as pbar:
+            for strategy_name, strategy_config, symbol in tasks:
+                # Print periodic updates
+                if completed_simulations % 10 == 0 or completed_simulations == len(tasks) - 1:
+                    print(f"\n📈 {completed_simulations+1}/{len(tasks)}: {strategy_name} on {symbol}")
+                
+                result = run_single_strategy_on_symbol(
+                    strategy_name, strategy_config, symbol,
+                    enriched_data_dict[symbol], spy_data, args,
+                    telemetry, buffer
+                )
                 
                 if result['success']:
                     if strategy_name not in results:
@@ -492,8 +545,9 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                     results[strategy_name][symbol] = result['tracker']
                     rejected_counts[strategy_name] = rejected_counts.get(strategy_name, 0) + result['rejected_trades']
                 else:
-                    print(f"⚠️  Failed: {strategy_name} on {symbol}: {result.get('error', 'Unknown error')}")
+                    print(f"\n⚠️  Failed: {strategy_name} on {symbol}: {result.get('error', 'Unknown error')}")
                 
+                completed_simulations += 1
                 pbar.update(1)
     
     simulation_time = time.time() - start_time
@@ -569,7 +623,6 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     
     return telemetry.db_path
 
-
 # ============================================================
 # PERFORMANCE TESTING
 # ============================================================
@@ -586,7 +639,7 @@ def test_performance_improvement(strategies, symbols, data_manager, args):
     test_symbols = symbols[:5]
     test_strategies = strategies[:2]
     
-    print(f"Testing with {len(test_strategies)} strategies and {len(test_symbols)} symbols")
+    print(f"Testing with {len(test_strategies)} strategies and {len(test_strategies)} symbols")
     print(f"Expected improvement: 5-15x speedup")
     print(f"{'='*70}\n")
     

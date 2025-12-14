@@ -9,11 +9,14 @@ import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 import importlib.util
+import numpy as np
+import pandas as pd
 
 from data_manager import DataManager
 from stock_universe import UniverseManager
 from config_optimizer import optimize_system, get_optimized_settings, ConfigOptimizer
 from simulator import run_simulation, test_performance_improvement
+from strategy_base import StrategyConfig  # ADDED THIS IMPORT
 
 # Load API credentials
 load_dotenv()
@@ -50,12 +53,28 @@ def parse_arguments():
     
     return parser.parse_args()
 
-
 def load_strategies(indicator_library=None):
+    """
+    Load all strategies from the strategies directory
+    Returns serializable strategy instances
+    """
     strategies = []
+    strategy_colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD']
+    
+    # Find all strategy files
+    strategy_dir = Path('./strategies')
+    strategy_files = list(strategy_dir.glob("strategy_*.py"))
+    
+    if not strategy_files:
+        print("⚠️  No strategy files found in strategies/ directory")
+        return strategies
+    
+    print(f"📊 Loading {len(strategy_files)} strategies...")
     
     for idx, strategy_file in enumerate(strategy_files):
         try:
+            module_name = f"strategy_{strategy_file.stem.split('_', 1)[1]}"
+            
             # Import module
             spec = importlib.util.spec_from_file_location(module_name, strategy_file)
             module = importlib.util.module_from_spec(spec)
@@ -65,26 +84,20 @@ def load_strategies(indicator_library=None):
                 print(f"⚠️  {strategy_file.name}: No 'Strategy' class found")
                 continue
             
-            # Try new config-based initialization
-            try:
-                config = StrategyConfig(
-                    name=filename_name,
-                    color=strategy_colors[idx % len(strategy_colors)],
-                    initial_capital=100000,
-                    position_size_pct=0.10,
-                    max_positions=10
-                )
-                strategy_instance = module.Strategy(config=config)
-                
-            except TypeError:
-                # Fallback for legacy strategies without config parameter
-                strategy_instance = module.Strategy()
-                strategy_instance.name = filename_name
-                strategy_instance.color = strategy_colors[idx % len(strategy_colors)]
-                
-                # Check if strategy has required_indicators
-                if not hasattr(strategy_instance, 'required_indicators'):
-                    strategy_instance.required_indicators = []
+            filename_name = strategy_file.stem.replace('strategy_', '').replace('_', ' ').title()
+            
+            # Create config
+            from strategy_base import StrategyConfig
+            config = StrategyConfig(
+                name=filename_name,
+                color=strategy_colors[idx % len(strategy_colors)],
+                initial_capital=100000,
+                position_size_pct=0.10,
+                max_positions=10
+            )
+            
+            # Create instance
+            strategy_instance = module.Strategy(config=config)
             
             # Attach indicator library
             if indicator_library is not None:
@@ -98,7 +111,7 @@ def load_strategies(indicator_library=None):
             import traceback
             traceback.print_exc()
     
-    return strategies 
+    return strategies
 
 def handle_download(args, data_manager, universe_manager):
     """Handle download command with optimized workers"""
@@ -318,7 +331,7 @@ def main():
             print(f"   Consider running optimization: python main.py --optimize")
             sys.exit(1)
     
-    # Run full simulation
+    # Run full simulation with error handling
     print(f"\n{'='*70}")
     print("STARTING OPTIMIZED SIMULATION")
     print(f"{'='*70}\n")
@@ -346,42 +359,53 @@ def main():
             print("Simulation cancelled")
             sys.exit(0)
     
-    db_path = run_simulation(
-        strategies=strategies,
-        symbols=symbols,
-        data_manager=data_manager,
-        universe_manager=universe_manager,
-        args=args
-    )
-    
-    if db_path:
-        print(f"\n{'='*70}")
-        print("✅ OPTIMIZED SIMULATION COMPLETE")
-        print(f"{'='*70}")
-        print(f"\n📊 Results saved to: {db_path}")
+    # Add error handling for simulation
+    try:
+        db_path = run_simulation(
+            strategies=strategies,
+            symbols=symbols,
+            data_manager=data_manager,
+            universe_manager=universe_manager,
+            args=args
+        )
         
-        # Show optimization stats
-        try:
-            from config_optimizer import OptimizationResult
-            opt_result = OptimizationResult.load()
-            if opt_result:
-                print(f"\n⚡ Performance Statistics:")
-                print(f"   Expected speedup: {opt_result.predicted_speedup:.1f}x")
-                print(f"   Estimated calculations/sec: {opt_result.estimated_calc_per_second:,.0f}")
-                print(f"   Memory reduction: {opt_result.predicted_memory_reduction:.1f}%")
-        except:
-            pass
-        
-        print(f"\n💡 Next steps:")
-        print(f"   1. Analyze results: cd ../analysis && python main.py --sim {db_path}")
-        print(f"   2. Create new strategies: Add files to strategies/ directory")
-        print(f"   3. Add custom indicators: Add files to indicators/ directory")
-        print(f"   4. Tune performance: python main.py --optimize")
-        print(f"\n📈 All indicators were pre-computed for maximum speed!")
-        print(f"   Query example: SELECT entry_relative_volume, profit_loss_pct FROM trade_history")
-        print(f"\n{'='*70}\n")
-    else:
-        print("\n❌ Simulation failed")
+        if db_path:
+            print(f"\n{'='*70}")
+            print("✅ OPTIMIZED SIMULATION COMPLETE")
+            print(f"{'='*70}")
+            print(f"\n📊 Results saved to: {db_path}")
+            
+            # Show optimization stats
+            try:
+                from config_optimizer import OptimizationResult
+                opt_result = OptimizationResult.load()
+                if opt_result:
+                    print(f"\n⚡ Performance Statistics:")
+                    print(f"   Expected speedup: {opt_result.predicted_speedup:.1f}x")
+                    print(f"   Estimated calculations/sec: {opt_result.estimated_calc_per_second:,.0f}")
+                    print(f"   Memory reduction: {opt_result.predicted_memory_reduction:.1f}%")
+            except:
+                pass
+            
+            print(f"\n💡 Next steps:")
+            print(f"   1. Analyze results: cd ../analysis && python main.py --sim {db_path}")
+            print(f"   2. Create new strategies: Add files to strategies/ directory")
+            print(f"   3. Add custom indicators: Add files to indicators/ directory")
+            print(f"   4. Tune performance: python main.py --optimize")
+            print(f"\n📈 All indicators were pre-computed for maximum speed!")
+            print(f"   Query example: SELECT entry_relative_volume, profit_loss_pct FROM trade_history")
+            print(f"\n{'='*70}\n")
+        else:
+            print("\n❌ Simulation failed")
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Simulation interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n\n❌ Simulation error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == '__main__':

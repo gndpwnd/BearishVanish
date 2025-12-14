@@ -1,6 +1,6 @@
 """
 Example Momentum Strategy using pre-computed indicators
-Shows how to use the optimized system
+Updated for parallel processing compatibility
 """
 
 import pandas as pd
@@ -25,6 +25,8 @@ class Strategy(StrategyBase):
         self.fast_ma = 20
         self.slow_ma = 50
         self.rsi_period = 14
+        self.rsi_oversold = 30
+        self.rsi_overbought = 70
         
         # Declare required indicators (will be pre-computed)
         self.required_indicators = [
@@ -52,38 +54,48 @@ class Strategy(StrategyBase):
         
         # Current and previous indices (relative to current bar)
         current_idx = -1  # Current bar is always last in historical data
-        prev_idx = -2     # Previous bar
+        prev_idx = -2 if len(data) >= 2 else -1  # Previous bar
         
         try:
             # Access pre-computed indicators (FAST - no calculation!)
-            # These were computed once before simulation started
-            fast_ma_current = data[f'sma_{self.fast_ma}'].iloc[current_idx]
-            fast_ma_prev = data[f'sma_{self.fast_ma}'].iloc[prev_idx]
+            fast_ma_col = f'sma_{self.fast_ma}'
+            slow_ma_col = f'sma_{self.slow_ma}'
+            rsi_col = f'rsi_{self.rsi_period}'
             
-            slow_ma_current = data[f'sma_{self.slow_ma}'].iloc[current_idx]
-            slow_ma_prev = data[f'sma_{self.slow_ma}'].iloc[prev_idx]
+            if fast_ma_col not in data.columns or slow_ma_col not in data.columns or rsi_col not in data.columns:
+                return 'HOLD'
             
-            rsi_current = data[f'rsi_{self.rsi_period}'].iloc[current_idx]
+            fast_ma_current = data[fast_ma_col].iloc[current_idx]
+            fast_ma_prev = data[fast_ma_col].iloc[prev_idx] if prev_idx >= -len(data) else None
+            
+            slow_ma_current = data[slow_ma_col].iloc[current_idx]
+            slow_ma_prev = data[slow_ma_col].iloc[prev_idx] if prev_idx >= -len(data) else None
+            
+            rsi_current = data[rsi_col].iloc[current_idx]
             
             # Check for NaN (shouldn't happen with pre-computation)
             if (pd.isna(fast_ma_current) or pd.isna(slow_ma_current) or 
                 pd.isna(rsi_current)):
                 return 'HOLD'
             
+            # Need previous values for crossover detection
+            if fast_ma_prev is None or slow_ma_prev is None:
+                return 'HOLD'
+            
             # --- BUY SIGNAL ---
             # Golden Cross: Fast MA crosses above Slow MA
             # And RSI is not overbought
-            if (fast_ma_current > slow_ma_current and 
-                fast_ma_prev <= slow_ma_prev and
-                rsi_current < 70):  # Not overbought
+            if (fast_ma_prev <= slow_ma_prev and  # Was below or equal
+                fast_ma_current > slow_ma_current and  # Now above
+                rsi_current < self.rsi_overbought):  # Not overbought
                 return 'BUY'
             
             # --- SELL SIGNAL ---
             # Death Cross: Fast MA crosses below Slow MA
             # And RSI is not oversold (optional filter)
-            elif (fast_ma_current < slow_ma_current and 
-                  fast_ma_prev >= slow_ma_prev and
-                  rsi_current > 30):  # Not oversold
+            elif (fast_ma_prev >= slow_ma_prev and  # Was above or equal
+                  fast_ma_current < slow_ma_current and  # Now below
+                  rsi_current > self.rsi_oversold):  # Not oversold
                 return 'SELL'
             
         except KeyError as e:
@@ -97,3 +109,15 @@ class Strategy(StrategyBase):
         
         # Default: hold position
         return 'HOLD'
+    
+    def get_config(self):
+        """Get serializable configuration"""
+        base_config = super().get_config()
+        base_config.update({
+            'fast_ma': self.fast_ma,
+            'slow_ma': self.slow_ma,
+            'rsi_period': self.rsi_period,
+            'rsi_oversold': self.rsi_oversold,
+            'rsi_overbought': self.rsi_overbought
+        })
+        return base_config
