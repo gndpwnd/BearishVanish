@@ -25,3 +25,5 @@ psutil
 tqdm
 pyperclip
 numba
+line-profiler
+memory-profiler
