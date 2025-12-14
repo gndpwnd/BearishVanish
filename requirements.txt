@@ -24,3 +24,4 @@ lxml
 psutil
 tqdm
 pyperclip
+numba

@@ -139,3 +139,51 @@ class StrategyBase:
             for symbol in list(self.blocked_signals.keys())[:5]:
                 blocks = self.blocked_signals[symbol]
                 print(f"      {symbol}: {len(blocks)} blocks - {blocks[0]['reason']}")
+    
+    
+    def get_volume_indicators(self, stock_data):
+        """Quick helper for volume indicators"""
+        try:
+            from indicators import calculate_volume_indicators
+            return calculate_volume_indicators(stock_data)
+        except ImportError:
+            return {}
+    
+    def get_indicator(self, indicator_name, stock_data, **params):
+        """Get any indicator value"""
+        try:
+            from indicators import get_indicator
+            return get_indicator(indicator_name, stock_data, **params)
+        except ImportError:
+            return None
+    
+    def get_all_volume_metrics(self, stock_data):
+        """
+        Get comprehensive volume metrics for the current bar
+        Returns dict with volume, avg_volume_20d, relative_volume, etc.
+        """
+        if stock_data.empty:
+            return {
+                'volume': 0,
+                'avg_volume_20d': 0,
+                'relative_volume': 1.0
+            }
+        
+        volume_indicators = self.get_volume_indicators(stock_data)
+        
+        # Ensure we have volume data
+        current_volume = stock_data['volume'].iloc[-1] if 'volume' in stock_data.columns else 0
+        
+        # Calculate 20-day average volume
+        if len(stock_data) >= 20:
+            avg_volume_20d = stock_data['volume'].tail(20).mean()
+        else:
+            avg_volume_20d = current_volume
+        
+        return {
+            'volume': current_volume,
+            'avg_volume_20d': avg_volume_20d,
+            'relative_volume': volume_indicators.get('relative_volume', 1.0),
+            'volume_sma_20': volume_indicators.get('volume_sma_20', current_volume),
+            **volume_indicators
+        }

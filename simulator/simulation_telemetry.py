@@ -3,7 +3,8 @@ Enhanced Simulation Telemetry with Complete Trade Recording AND BATCH OPTIMIZATI
 FIXES: Missing timestamps, rejected trades, trade attempts, and context data
 USES SIMULATION TIMESTAMPS to prevent look-ahead bias
 ADDED: Batch insert methods for 5-10x speedup
-FIXED: batch_update_trade_exits unpacking error
+ADDED: Volume tracking for all trades
+FIXED: Indentation errors in record methods
 """
 
 import sqlite3
@@ -43,7 +44,7 @@ class SimulationTelemetry:
         self._init_database()
     
     def _init_database(self):
-        """Create enhanced database schema with strategy configuration"""
+        """Create enhanced database schema with volume tracking"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -92,13 +93,13 @@ class SimulationTelemetry:
                 beta REAL,
                 alpha_pct REAL,
                 information_ratio REAL,
-                position_size_pct REAL,     -- NEW: Strategy position size percentage
-                max_positions INTEGER,      -- NEW: Strategy maximum concurrent positions
-                strategy_config_json TEXT   -- NEW: Full strategy configuration as JSON
+                position_size_pct REAL,
+                max_positions INTEGER,
+                strategy_config_json TEXT
             )
         ''')
         
-        # Table 3: ENHANCED Trade history with full timestamps
+        # Table 3: ENHANCED Trade history with volume tracking
         cursor.execute('''
             CREATE TABLE trade_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,12 +109,24 @@ class SimulationTelemetry:
                 entry_date TEXT NOT NULL,
                 entry_price REAL NOT NULL,
                 shares REAL NOT NULL,
+                
+                -- Volume at entry
+                entry_volume INTEGER,
+                entry_avg_volume_20d REAL,
+                entry_relative_volume REAL,
+                
                 entry_portfolio_value REAL,
                 entry_cash REAL,
                 entry_num_positions INTEGER,
                 exit_timestamp INTEGER,
                 exit_date TEXT,
                 exit_price REAL,
+                
+                -- Volume at exit
+                exit_volume INTEGER,
+                exit_avg_volume_20d REAL,
+                exit_relative_volume REAL,
+                
                 exit_portfolio_value REAL,
                 exit_cash REAL,
                 profit_loss_dollars REAL,
@@ -127,7 +140,7 @@ class SimulationTelemetry:
             )
         ''')
         
-        # Table 4: NEW - Trade attempts (including rejections)
+        # Table 4: Trade attempts with volume
         cursor.execute('''
             CREATE TABLE trade_attempts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +150,12 @@ class SimulationTelemetry:
                 symbol TEXT NOT NULL,
                 signal TEXT NOT NULL,
                 price REAL NOT NULL,
+                
+                -- Volume metrics
+                volume INTEGER,
+                avg_volume_20d REAL,
+                relative_volume REAL,
+                
                 portfolio_value REAL,
                 cash REAL,
                 num_positions INTEGER,
@@ -175,7 +194,7 @@ class SimulationTelemetry:
             )
         ''')
         
-        # Table 7: NEW - Bar-by-bar execution log
+        # Table 7: Bar-by-bar execution log
         cursor.execute('''
             CREATE TABLE execution_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -189,7 +208,7 @@ class SimulationTelemetry:
             )
         ''')
         
-        # Table 8: NEW - Strategy configurations
+        # Table 8: Strategy configurations
         cursor.execute('''
             CREATE TABLE strategy_configs (
                 strategy_name TEXT PRIMARY KEY,
@@ -202,13 +221,30 @@ class SimulationTelemetry:
             )
         ''')
         
-        # Indexes
+        # Table 9: NEW - Indicator history for debugging
+        cursor.execute('''
+            CREATE TABLE indicator_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                strategy_name TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                indicator_name TEXT NOT NULL,
+                indicator_value REAL,
+                indicator_params TEXT
+            )
+        ''')
+        
+        # Indexes for performance
         cursor.execute('CREATE INDEX idx_trades_strategy ON trade_history(strategy_name, trade_status)')
         cursor.execute('CREATE INDEX idx_trades_symbol ON trade_history(symbol)')
         cursor.execute('CREATE INDEX idx_trades_entry_ts ON trade_history(entry_timestamp)')
+        cursor.execute('CREATE INDEX idx_trades_volume ON trade_history(entry_relative_volume, exit_relative_volume)')
         cursor.execute('CREATE INDEX idx_portfolio_strategy ON portfolio_history(strategy_name, timestamp)')
         cursor.execute('CREATE INDEX idx_attempts_strategy ON trade_attempts(strategy_name, success)')
+        cursor.execute('CREATE INDEX idx_attempts_volume ON trade_attempts(relative_volume, success)')
         cursor.execute('CREATE INDEX idx_execution_strategy ON execution_log(strategy_name, timestamp)')
+        cursor.execute('CREATE INDEX idx_indicator_history ON indicator_history(strategy_name, symbol, indicator_name)')
         
         conn.commit()
         conn.close()
@@ -219,8 +255,6 @@ class SimulationTelemetry:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Simulation metadata uses real-world timestamps (when simulation runs)
-        # This is OK because it's about the simulation itself, not the trading
         cursor.execute('''
             INSERT INTO simulation_info 
             (simulation_id, start_time, universe_name, num_symbols,
@@ -261,23 +295,23 @@ class SimulationTelemetry:
             
     def record_trade_attempt(self, strategy_name, symbol, signal, price, date,
                             portfolio_value, cash, num_positions, max_positions,
-                            success, rejection_reason=None):
+                            success, rejection_reason=None, volume=0, avg_volume_20d=0, relative_volume=1.0):
         """
-        Record EVERY trade attempt, including rejections
-        Uses SIMULATION TIME, not real-world time to prevent look-ahead bias
+        Record EVERY trade attempt, including rejections WITH VOLUME
+        Uses SIMULATION TIME, not real-world time
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Use simulation time (not real-world time)
         timestamp = self._get_simulation_timestamp(date)
         
         cursor.execute('''
             INSERT INTO trade_attempts
             (timestamp, date, strategy_name, symbol, signal, price,
+             volume, avg_volume_20d, relative_volume,
              portfolio_value, cash, num_positions, max_positions, 
              success, rejection_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             timestamp,
             str(date),
@@ -285,6 +319,9 @@ class SimulationTelemetry:
             symbol,
             signal,
             price,
+            volume,
+            avg_volume_20d,
+            relative_volume,
             portfolio_value,
             cash,
             num_positions,
@@ -298,25 +335,26 @@ class SimulationTelemetry:
 
     def record_trade_entry(self, strategy_name, symbol, date, price, shares,
                           portfolio_value=None, cash=None, num_positions=None,
-                          entry_reason=None):
+                          entry_reason=None, volume=0, avg_volume_20d=0, relative_volume=1.0):
         """
-        Record BUY trade with enhanced context
+        Record BUY trade with volume data
         Uses SIMULATION TIME, not real-world time
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Use simulation time (not real-world time)
         timestamp = self._get_simulation_timestamp(date)
         
         cursor.execute('''
             INSERT INTO trade_history
             (strategy_name, symbol, entry_timestamp, entry_date, entry_price, shares,
+             entry_volume, entry_avg_volume_20d, entry_relative_volume,
              entry_portfolio_value, entry_cash, entry_num_positions, 
              trade_status, entry_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
         ''', (
             strategy_name, symbol, timestamp, str(date), price, shares,
+            volume, avg_volume_20d, relative_volume,
             portfolio_value, cash, num_positions, entry_reason
         ))
         
@@ -324,15 +362,15 @@ class SimulationTelemetry:
         conn.close()
 
     def record_trade_exit(self, strategy_name, symbol, exit_date, exit_price,
-                         portfolio_value=None, cash=None, forced=False, reason=None):
+                         portfolio_value=None, cash=None, forced=False, reason=None,
+                         volume=0, avg_volume_20d=0, relative_volume=1.0):
         """
-        Record SELL trade with enhanced context
+        Record SELL trade with volume data
         Uses SIMULATION TIME, not real-world time
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Use simulation time (not real-world time)
         exit_timestamp = self._get_simulation_timestamp(exit_date)
         
         # Find most recent OPEN trade
@@ -351,22 +389,17 @@ class SimulationTelemetry:
         
         trade_id, entry_timestamp, entry_date, entry_price, shares = trade
         
-        # Calculate P&L (using simulation times)
+        # Calculate P&L
         profit_loss = (exit_price - entry_price) * shares
         profit_loss_pct = (exit_price - entry_price) / entry_price * 100
-        
-        # Calculate holding period using simulation timestamps
-        holding_days = (exit_timestamp - entry_timestamp) / 86400.0  # Convert seconds to days
-        
-        # For holding bars, we need to know the bar frequency
-        # Since we don't have that here, we can leave it or calculate differently
-        # Let's approximate assuming daily bars (1 bar per day)
+        holding_days = (exit_timestamp - entry_timestamp) / 86400.0
         holding_bars = int(holding_days)
         
         # Update trade
         cursor.execute('''
             UPDATE trade_history
             SET exit_timestamp = ?, exit_date = ?, exit_price = ?,
+                exit_volume = ?, exit_avg_volume_20d = ?, exit_relative_volume = ?,
                 exit_portfolio_value = ?, exit_cash = ?,
                 profit_loss_dollars = ?, profit_loss_pct = ?,
                 holding_days = ?, holding_bars = ?,
@@ -375,6 +408,7 @@ class SimulationTelemetry:
             WHERE id = ?
         ''', (
             exit_timestamp, str(exit_date), exit_price,
+            volume, avg_volume_20d, relative_volume,
             portfolio_value, cash,
             profit_loss, profit_loss_pct,
             holding_days, holding_bars,
@@ -390,7 +424,6 @@ class SimulationTelemetry:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Use simulation time (not real-world time)
         timestamp = self._get_simulation_timestamp(date)
         
         cursor.execute('''
@@ -412,7 +445,6 @@ class SimulationTelemetry:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Use simulation time (not real-world time)
         timestamp = self._get_simulation_timestamp(date)
         
         cursor.execute('''
@@ -545,7 +577,6 @@ class SimulationTelemetry:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Simulation end uses real-world timestamp (when simulation finished)
         cursor.execute('''
             UPDATE simulation_info 
             SET end_time = ?
@@ -595,11 +626,12 @@ class SimulationTelemetry:
     
     def batch_insert_trade_attempts(self, attempts_list):
         """
-        Batch insert trade attempts (including rejections)
+        Batch insert trade attempts with volume
         5-10x faster than individual inserts
         
         Args:
             attempts_list: List of tuples matching trade_attempts schema
+            Each tuple should have 15 values
         """
         if not attempts_list:
             return
@@ -610,9 +642,10 @@ class SimulationTelemetry:
         cursor.executemany('''
             INSERT INTO trade_attempts
             (timestamp, date, strategy_name, symbol, signal, price,
+             volume, avg_volume_20d, relative_volume,
              portfolio_value, cash, num_positions, max_positions, 
              success, rejection_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', attempts_list)
         
         conn.commit()
@@ -620,10 +653,11 @@ class SimulationTelemetry:
 
     def batch_insert_trade_entries(self, entries_list):
         """
-        Batch insert trade entries (BUY orders)
+        Batch insert trade entries with volume
         
         Args:
             entries_list: List of tuples matching trade_history schema
+            Each tuple should have 14 values
         """
         if not entries_list:
             return
@@ -634,9 +668,10 @@ class SimulationTelemetry:
         cursor.executemany('''
             INSERT INTO trade_history
             (strategy_name, symbol, entry_timestamp, entry_date, entry_price, shares,
+             entry_volume, entry_avg_volume_20d, entry_relative_volume,
              entry_portfolio_value, entry_cash, entry_num_positions, 
              trade_status, entry_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
         ''', entries_list)
         
         conn.commit()
@@ -644,11 +679,11 @@ class SimulationTelemetry:
 
     def batch_update_trade_exits(self, exits_list):
         """
-        Batch update trade exits (SELL orders)
-        SIMPLER FIX: Access tuple elements directly
+        Batch update trade exits with volume
+        Each tuple should have 16 values
         
         Args:
-            exits_list: List of tuples where each tuple contains 13 values
+            exits_list: List of tuples where each tuple contains 16 values
         """
         if not exits_list:
             return
@@ -659,24 +694,27 @@ class SimulationTelemetry:
         for exit_tuple in exits_list:
             try:
                 # Check we have the right number of elements
-                if len(exit_tuple) != 13:
-                    print(f"⚠️  Skipping: Expected 13 values, got {len(exit_tuple)}")
+                if len(exit_tuple) != 16:
+                    print(f"⚠️  Skipping: Expected 16 values, got {len(exit_tuple)}")
                     continue
                     
-                # Extract values by index (simpler than unpacking)
+                # Extract values by index
                 exit_timestamp = exit_tuple[0]
                 exit_date = exit_tuple[1]
                 exit_price = exit_tuple[2]
-                portfolio_value = exit_tuple[3]
-                cash = exit_tuple[4]
-                profit_loss = exit_tuple[5]
-                profit_loss_pct = exit_tuple[6]
-                holding_days = exit_tuple[7]
-                holding_bars = exit_tuple[8]
-                forced = exit_tuple[9]
-                reason = exit_tuple[10]
-                strategy_name = exit_tuple[11]
-                symbol = exit_tuple[12]
+                exit_volume = exit_tuple[3]
+                exit_avg_volume_20d = exit_tuple[4]
+                exit_relative_volume = exit_tuple[5]
+                portfolio_value = exit_tuple[6]
+                cash = exit_tuple[7]
+                profit_loss = exit_tuple[8]
+                profit_loss_pct = exit_tuple[9]
+                holding_days = exit_tuple[10]
+                holding_bars = exit_tuple[11]
+                forced = exit_tuple[12]
+                reason = exit_tuple[13]
+                strategy_name = exit_tuple[14]
+                symbol = exit_tuple[15]
                 
                 # Find most recent OPEN trade
                 cursor.execute('''
@@ -691,13 +729,14 @@ class SimulationTelemetry:
                 if trade:
                     trade_id, entry_timestamp_db, entry_price_db, shares = trade
                     
-                    # Calculate P&L if not provided
+                    # Use provided P&L values or calculate if not provided
                     profit_loss_calc = profit_loss if profit_loss is not None else (exit_price - entry_price_db) * shares
                     profit_loss_pct_calc = profit_loss_pct if profit_loss_pct is not None else ((exit_price - entry_price_db) / entry_price_db * 100) if entry_price_db > 0 else 0
                     
                     cursor.execute('''
                         UPDATE trade_history
                         SET exit_timestamp = ?, exit_date = ?, exit_price = ?,
+                            exit_volume = ?, exit_avg_volume_20d = ?, exit_relative_volume = ?,
                             exit_portfolio_value = ?, exit_cash = ?,
                             profit_loss_dollars = ?, profit_loss_pct = ?,
                             holding_days = ?, holding_bars = ?,
@@ -706,6 +745,7 @@ class SimulationTelemetry:
                         WHERE id = ?
                     ''', (
                         exit_timestamp, str(exit_date), exit_price,
+                        exit_volume, exit_avg_volume_20d, exit_relative_volume,
                         portfolio_value, cash,
                         profit_loss_calc, profit_loss_pct_calc,
                         holding_days, holding_bars,
@@ -744,27 +784,28 @@ class SimulationTelemetry:
         conn.commit()
         conn.close()
 
-        def batch_insert_execution_log(self, log_entries):
-            """
-            Batch insert execution log entries
-            
-            Args:
-                log_entries: List of tuples for execution_log table
-            """
-            if not log_entries:
-                return
-            
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.executemany('''
-                INSERT INTO execution_log
-                (timestamp, date, bar_number, strategy_name, symbol, action, details)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', log_entries)
-            
-            conn.commit()
-            conn.close()
+    def batch_insert_execution_log(self, log_entries):
+        """
+        Batch insert execution log entries
+        
+        Args:
+            log_entries: List of tuples for execution_log table
+        """
+        if not log_entries:
+            return
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.executemany('''
+            INSERT INTO execution_log
+            (timestamp, date, bar_number, strategy_name, symbol, action, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', log_entries)
+        
+        conn.commit()
+        conn.close()
+
 
 # ============================================================
 # HELPER: Flush Buffer Class
@@ -801,14 +842,14 @@ class BatchBuffer:
     
     def add_exit(self, *args):
         """Add trade exit to buffer - FIXED VERSION"""
-        # Check if we received a single tuple with 13 values
-        if len(args) == 1 and isinstance(args[0], tuple) and len(args[0]) == 13:
+        # Check if we received a single tuple with 16 values
+        if len(args) == 1 and isinstance(args[0], tuple) and len(args[0]) == 16:
             self.exits.append(args[0])
-        # Check if we received 13 separate arguments
-        elif len(args) == 13:
+        # Check if we received 16 separate arguments
+        elif len(args) == 16:
             self.exits.append(args)
         else:
-            print(f"⚠️  Warning: Invalid exit data format. Got {len(args)} arguments")
+            print(f"⚠️  Warning: Invalid exit data format. Got {len(args)} arguments, expected 16")
             if len(args) == 1:
                 print(f"   Argument type: {type(args[0])}, length: {len(args[0]) if hasattr(args[0], '__len__') else 'N/A'}")
             return

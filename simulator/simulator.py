@@ -3,6 +3,7 @@ Stock Trading Strategy Simulator - Pure Calculation Engine
 OPTIMIZED: Batch database writes and parallel processing (5-10x faster)
 NO GUI - only calculations, metrics, and telemetry export
 ENHANCED: Complete telemetry with timestamps, rejected trades, and full context
+ADDED: Volume tracking and indicator system integration
 """
 
 import time
@@ -11,6 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import pandas as pd
 import multiprocessing as mp
+from pathlib import Path
 
 from strategy_tracker import StrategyTracker, INITIAL_CASH
 from simulation_telemetry import SimulationTelemetry, BatchBuffer
@@ -18,7 +20,7 @@ from simulation_telemetry import SimulationTelemetry, BatchBuffer
 HISTORY = 180  # 6 months
 
 def simulate_strategy_on_stock(strategy_class, symbol, stock_data, spy_data, 
-                                common_dates, approved_universe):
+                                common_dates, approved_universe, indicator_library=None):
     """
     Simulate ONE strategy on ONE stock across all time points
     This function is parallelizable
@@ -27,6 +29,11 @@ def simulate_strategy_on_stock(strategy_class, symbol, stock_data, spy_data,
     """
     # Create strategy instance (each process gets its own)
     strategy = strategy_class()
+    
+    # Attach indicator library if provided
+    if indicator_library is not None:
+        strategy.indicator_library = indicator_library
+    
     signals = []
     
     for i, current_date in enumerate(common_dates):
@@ -51,8 +58,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     """
     Pure simulation engine - NO GUI, just calculations
     OPTIMIZED: Uses batch database writes and parallel processing
-    
-    Returns: Path to simulation database
+    ENHANCED: Volume tracking and indicator system integration
     """
     
     print(f"\n{'='*70}")
@@ -111,6 +117,35 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     
     print(f"📊 Time points: {len(common_dates)} ({common_dates[0].date()} to {common_dates[-1].date()})")
     
+    # Load indicator system
+    print("\n📊 Loading indicator system...")
+    try:
+        from indicators import get_indicator_library
+        
+        # Create indicators directory if it doesn't exist
+        indicators_dir = Path('./indicators')
+        indicators_dir.mkdir(exist_ok=True)
+        
+        # Get indicator library
+        indicator_library = get_indicator_library()
+        
+        # Create example indicator file if none exist
+        if not list(indicators_dir.glob("indicator_*.py")):
+            indicator_library.create_example_indicator()
+        
+        print(f"✅ Indicator system ready ({len(indicator_library._functions)} indicators)")
+        
+        # Attach indicator library to strategies
+        for strategy in strategies:
+            strategy.indicator_library = indicator_library
+            
+    except ImportError as e:
+        print(f"⚠️  Indicator system unavailable: {e}")
+        indicator_library = None
+    except Exception as e:
+        print(f"⚠️  Error loading indicators: {e}")
+        indicator_library = None
+    
     # Print strategy configurations
     print(f"\n📊 STRATEGY CONFIGURATIONS:")
     for strategy in strategies:
@@ -118,6 +153,8 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         print(f"    Initial Capital: ${strategy.initial_capital:,.0f}")
         print(f"    Position Size: {strategy.position_size_pct*100:.1f}%")
         print(f"    Max Positions: {strategy.max_positions}")
+        if hasattr(strategy, 'indicator_library') and strategy.indicator_library:
+            print(f"    Indicators: Available")
     
     # Record simulation start
     telemetry.record_simulation_start(
@@ -129,7 +166,8 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         config={
             'force_liquidate': args.force_liquidate,
             'no_universe_check': args.no_universe_check,
-            'strategies': [s.get_config() for s in strategies] if hasattr(strategies[0], 'get_config') else []
+            'strategies': [s.get_config() for s in strategies] if hasattr(strategies[0], 'get_config') else [],
+            'indicators_enabled': indicator_library is not None
         }
     )
     
@@ -161,6 +199,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     print(f"Strategies: {len(strategies)}")
     print(f"Symbols: {len(symbols_with_data)}")
     print(f"Time Points: {len(common_dates)}")
+    print(f"Indicators: {indicator_library is not None}")
     print(f"Total Iterations: {len(strategies) * len(symbols_with_data) * len(common_dates):,}\n")
     
     # ============================================================
@@ -198,7 +237,8 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                         stock_data_dict[symbol],
                         spy_data,
                         common_dates,
-                        approved_universe
+                        approved_universe,
+                        indicator_library  # Pass indicator library
                     )
                     futures[future] = (strategy.name, symbol)
             
@@ -222,8 +262,29 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         for strategy_name, signals in strategy_signals.items():
             signals.sort(key=lambda x: x[0])  # Sort by date
         
-        print("\n📊 Recording trades with BATCH telemetry...")
+        print("\n📊 Recording trades with BATCH telemetry and VOLUME tracking...")
         
+        # Helper function to calculate volume metrics
+        def get_volume_metrics(symbol, date, stock_data):
+            """Calculate volume metrics for a specific date"""
+            if symbol not in stock_data or date not in stock_data[symbol].index:
+                return 0, 0, 1.0
+            
+            current_bar = stock_data[symbol].loc[date]
+            current_volume = current_bar.get('volume', 0)
+            
+            # Get previous data for average calculation
+            past_data = stock_data[symbol].loc[:date]
+            if len(past_data) >= 20:
+                avg_volume_20d = past_data['volume'].tail(20).mean()
+            else:
+                avg_volume_20d = past_data['volume'].mean() if len(past_data) > 0 else current_volume
+            
+            # Calculate relative volume
+            relative_volume = current_volume / avg_volume_20d if avg_volume_20d > 0 else 1.0
+            
+            return current_volume, avg_volume_20d, relative_volume
+
         # Process each strategy's signals in date order with batching
         for strategy in tqdm(strategies, desc="Processing strategies"):
             strategy_name = strategy.name
@@ -254,6 +315,11 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                         # Get price for this specific symbol
                         price = stock_data_dict[symbol].loc[date, 'close']
                         
+                        # Get volume metrics
+                        current_volume, avg_volume_20d, relative_volume = get_volume_metrics(
+                            symbol, date, stock_data_dict
+                        )
+                        
                         # Get portfolio state BEFORE attempting trade
                         current_portfolio_value = tracker.get_current_portfolio_value(current_prices)
                         
@@ -276,11 +342,13 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                             
                             rejection_counts[strategy_name] += 1
                         
-                        # BATCH: Add to buffer
+                        # BATCH: Add to buffer WITH VOLUME
                         attempt_timestamp = telemetry._get_simulation_timestamp(date)
                         batch_buffer.add_attempt(
                             attempt_timestamp, str(date), strategy_name, symbol,
-                            signal, price, current_portfolio_value, tracker.cash,
+                            signal, price,
+                            current_volume, avg_volume_20d, relative_volume,  # Volume metrics
+                            current_portfolio_value, tracker.cash,
                             tracker.get_current_position_count(), tracker.max_positions,
                             success, rejection_reason
                         )
@@ -294,6 +362,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                                 batch_buffer.add_entry(
                                     strategy_name, symbol, entry_timestamp, str(date),
                                     price, tracker.positions[symbol],
+                                    current_volume, avg_volume_20d, relative_volume,  # Volume metrics
                                     updated_portfolio_value, tracker.cash,
                                     tracker.get_current_position_count(),
                                     f'signal_generated_bar_{i}'
@@ -331,9 +400,10 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                                     holding_days = 0
                                     holding_bars = 0
                                 
-                                # Create tuple with exactly 13 values
+                                # Create tuple with exactly 16 values (13 original + 3 volume)
                                 exit_data_tuple = (
                                     exit_timestamp, str(date), price,
+                                    current_volume, avg_volume_20d, relative_volume,  # Volume metrics
                                     updated_portfolio_value, tracker.cash,
                                     profit_loss, profit_loss_pct,
                                     holding_days, holding_bars,
@@ -371,6 +441,27 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         # SEQUENTIAL: Process bar-by-bar with BATCH telemetry
         # ============================================================
         print("📊 Using sequential processing with BATCH telemetry\n")
+        
+        # Helper function to calculate volume metrics
+        def get_volume_metrics(symbol, date, stock_data):
+            """Calculate volume metrics for a specific date"""
+            if symbol not in stock_data or date not in stock_data[symbol].index:
+                return 0, 0, 1.0
+            
+            current_bar = stock_data[symbol].loc[date]
+            current_volume = current_bar.get('volume', 0)
+            
+            # Get previous data for average calculation
+            past_data = stock_data[symbol].loc[:date]
+            if len(past_data) >= 20:
+                avg_volume_20d = past_data['volume'].tail(20).mean()
+            else:
+                avg_volume_20d = past_data['volume'].mean() if len(past_data) > 0 else current_volume
+            
+            # Calculate relative volume
+            relative_volume = current_volume / avg_volume_20d if avg_volume_20d > 0 else 1.0
+            
+            return current_volume, avg_volume_20d, relative_volume
         
         # Initialize batch buffer
         batch_buffer = BatchBuffer(telemetry, batch_size=1000)
@@ -418,6 +509,11 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                         # Get price for this specific symbol
                         price = current_prices[symbol]
                         
+                        # Get volume metrics
+                        current_volume, avg_volume_20d, relative_volume = get_volume_metrics(
+                            symbol, current_date, stock_data_dict
+                        )
+                        
                         # Try to execute trade
                         success = tracker.execute_trade(symbol, signal, price, current_date)
                         
@@ -437,11 +533,13 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                             
                             rejection_counts[strategy.name] += 1
                         
-                        # BATCH: Add attempt to buffer
+                        # BATCH: Add attempt to buffer WITH VOLUME
                         attempt_timestamp = telemetry._get_simulation_timestamp(current_date)
                         batch_buffer.add_attempt(
                             attempt_timestamp, str(current_date), strategy.name, symbol,
-                            signal, price, initial_portfolio_value, tracker.cash,
+                            signal, price,
+                            current_volume, avg_volume_20d, relative_volume,  # Volume metrics
+                            initial_portfolio_value, tracker.cash,
                             tracker.get_current_position_count(), tracker.max_positions,
                             success, rejection_reason
                         )
@@ -454,11 +552,12 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                             updated_portfolio_value = tracker.get_current_portfolio_value(current_prices)
                             entry_timestamp = telemetry._get_simulation_timestamp(current_date)
                             
-                            # BATCH: Add to buffer
+                            # BATCH: Add to buffer WITH VOLUME
                             if signal == 'BUY':
                                 batch_buffer.add_entry(
                                     strategy.name, symbol, entry_timestamp, str(current_date),
                                     price, tracker.positions[symbol],
+                                    current_volume, avg_volume_20d, relative_volume,  # Volume metrics
                                     updated_portfolio_value, tracker.cash,
                                     tracker.get_current_position_count(),
                                     f'signal_generated_bar_{i}'
@@ -495,9 +594,10 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                                     holding_days = 0
                                     holding_bars = 0
                                 
-                                # Create tuple with exactly 13 values
+                                # Create tuple with exactly 16 values
                                 exit_data_tuple = (
                                     exit_timestamp, str(current_date), price,
+                                    current_volume, avg_volume_20d, relative_volume,  # Volume metrics
                                     updated_portfolio_value, tracker.cash,
                                     profit_loss, profit_loss_pct,
                                     holding_days, holding_bars,
@@ -549,6 +649,11 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
             # Record forced liquidations
             for symbol in list(tracker.positions.keys()):
                 if tracker.positions.get(symbol, 0) > 0:
+                    # Get volume metrics for final date
+                    current_volume, avg_volume_20d, relative_volume = get_volume_metrics(
+                        symbol, final_date, stock_data_dict
+                    )
+                    
                     telemetry.record_trade_exit(
                         strategy_name=strategy.name,
                         symbol=symbol,
@@ -557,7 +662,10 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                         portfolio_value=tracker.get_final_value(),
                         cash=tracker.cash,
                         forced=True,
-                        reason='force_liquidate_end_of_simulation'
+                        reason='force_liquidate_end_of_simulation',
+                        volume=current_volume,
+                        avg_volume_20d=avg_volume_20d,
+                        relative_volume=relative_volume
                     )
     
     # Calculate SPY returns
@@ -625,4 +733,3 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     print_performance_stats(total_start_time, len(strategies), len(symbols_with_data), len(common_dates))
     
     return telemetry.db_path
-

@@ -1,6 +1,7 @@
 """
 Enhanced Strategy Tracker with Flexible Position Sizing and Force-Liquidation Support
 Supports multiple starting capital amounts and flexible position limits
+ADDED: Volume tracking in trades
 """
 
 import numpy as np
@@ -45,10 +46,10 @@ class StrategyTracker:
         """Count non-zero positions"""
         return sum(1 for shares in self.positions.values() if shares > 0)
     
-    # In strategy_tracker.py, modify the execute_trade method to print debug info:
-    def execute_trade(self, symbol, signal, price, date, force=False):
+    def execute_trade(self, symbol, signal, price, date, force=False, volume=None):
         """
         Execute trade with SMART POSITION SIZING and return success status
+        ADDED: volume parameter to store volume data
         """
         
         if signal == 'BUY' and self.cash > 0:
@@ -92,7 +93,8 @@ class StrategyTracker:
                 'price': price, 
                 'shares': shares,
                 'cost': actual_cost,
-                'forced': force
+                'forced': force,
+                'volume': volume  # NEW: Store volume
             })
             print(f"✅ {self.name}: BOUGHT {shares:.2f} shares of {symbol} at ${price:.2f} (${actual_cost:.2f})")
             return True  # Trade succeeded
@@ -113,7 +115,8 @@ class StrategyTracker:
                 'price': price, 
                 'shares': shares, 
                 'proceeds': proceeds,
-                'forced': force
+                'forced': force,
+                'volume': volume  # NEW: Store volume
             })
             print(f"✅ {self.name}: SOLD {shares:.2f} shares of {symbol} at ${price:.2f} (${proceeds:.2f})")
             return True  # Trade succeeded
@@ -189,7 +192,6 @@ class StrategyTracker:
     def get_num_sells(self):
         return sum(1 for t in self.trades if t['action'] == 'SELL')
     
-    # Replace the existing get_win_rate() method with this:
     def get_win_rate(self):
         """Calculate win rate PROPERLY - only completed buy-sell pairs"""
         wins = 0

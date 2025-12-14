@@ -1,6 +1,7 @@
 """
 Stock Trading Strategy Simulator - Main Entry Point
 Pure simulation engine - NO analysis, NO GUI
+ENHANCED: Volume tracking and indicator system integration
 """
 
 import os
@@ -52,7 +53,7 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def load_strategies():
+def load_strategies(indicator_library=None):
     """Load all strategy files from strategies/ directory with configurable parameters"""
     strategies = []
     
@@ -79,6 +80,12 @@ def load_strategies():
         },
         '500 Intersection': {
             'color': '#ff7f0e',
+            'initial_capital': 100000,
+            'position_size_pct': 0.10,
+            'max_positions': 10
+        },
+        'Volume Indicator Strategy': {  # NEW: Example volume strategy
+            'color': '#2ca02c',
             'initial_capital': 100000,
             'position_size_pct': 0.10,
             'max_positions': 10
@@ -114,6 +121,10 @@ def load_strategies():
                 if not hasattr(strategy_instance, 'name') or strategy_instance.name == "Strategy":
                     strategy_instance.name = filename_name
                 
+                # Attach indicator library if available
+                if indicator_library is not None:
+                    strategy_instance.indicator_library = indicator_library
+                
                 strategies.append(strategy_instance)
                 
                 # Print configuration
@@ -121,13 +132,14 @@ def load_strategies():
                 print(f"   Config: Capital=${strategy_instance.initial_capital:,}, "
                       f"Pos Size={strategy_instance.position_size_pct*100:.1f}%, "
                       f"Max Pos={strategy_instance.max_positions}")
+                if hasattr(strategy_instance, 'indicator_library') and strategy_instance.indicator_library:
+                    print(f"   Indicators: Available")
         except Exception as e:
             print(f"❌ Error loading {strategy_file}: {e}")
     
     print(f"\n{'='*70}\n")
     
-    return strategies
-    
+    return strategies   
 
 def handle_download(args, data_manager, universe_manager):
     """Handle download command"""
@@ -223,8 +235,44 @@ def main():
     if args.offline:
         print("\n⚠️  OFFLINE MODE - Using cached data only")
     
-    # Load strategies
-    strategies = load_strategies()
+    # Initialize indicator system (must be done BEFORE loading strategies)
+    print("\n📊 Initializing indicator system...")
+    try:
+        from indicator_loader import get_indicator_library
+        
+        # Create indicators directory if it doesn't exist
+        indicators_dir = Path('./indicators')
+        indicators_dir.mkdir(exist_ok=True)
+        
+        # Get indicator library
+        indicator_library = get_indicator_library()
+        
+        # Create example indicator file if none exist
+        if not list(indicators_dir.glob("indicator_*.py")):
+            print("📝 Creating example indicator files...")
+            indicator_library.create_example_indicator('function')
+            indicator_library.create_example_indicator('class')
+        
+        print(f"✅ Indicator system ready")
+        print(f"   Available indicators: {len(indicator_library._functions)} functions, {len(indicator_library._classes)} classes")
+        
+        # List available indicators
+        indicator_list = indicator_library.list_indicators()
+        if indicator_list['functions']:
+            print(f"   Functions: {', '.join(indicator_list['functions'][:5])}{'...' if len(indicator_list['functions']) > 5 else ''}")
+        if indicator_list['classes']:
+            print(f"   Classes: {', '.join(indicator_list['classes'])}")
+        
+    except ImportError as e:
+        print(f"⚠️  Could not import indicator system: {e}")
+        print(f"   Make sure indicator_base.py and indicator_loader.py are in your project directory")
+        indicator_library = None
+    except Exception as e:
+        print(f"⚠️  Error initializing indicator system: {e}")
+        indicator_library = None
+    
+    # Load strategies WITH indicator library
+    strategies = load_strategies(indicator_library=indicator_library)
     
     if not strategies:
         print("❌ No strategies found")
@@ -253,6 +301,8 @@ def main():
     print(f"Symbols: {len(symbols)}")
     print(f"Universe: {args.universe or 'custom'}")
     print(f"Force Liquidate: {args.force_liquidate}")
+    print(f"No Universe Check: {args.no_universe_check}")
+    print(f"Indicator System: {indicator_library is not None}")
     print(f"\n{'='*70}\n")
     
     db_path = run_simulation(
@@ -271,11 +321,15 @@ def main():
         print(f"\n💡 To analyze results:")
         print(f"   cd ../analysis")
         print(f"   python main.py --sim {db_path}")
+        print(f"\n📈 Volume metrics are now tracked in the database!")
+        print(f"   Query example: SELECT entry_relative_volume, profit_loss_pct FROM trade_history")
+        print(f"\n📊 Indicators used: {indicator_library is not None}")
+        if indicator_library:
+            print(f"   Total indicators: {len(indicator_library._functions)} functions, {len(indicator_library._classes)} classes")
         print(f"\n{'='*70}\n")
     else:
         print("\n❌ Simulation failed")
         sys.exit(1)
-
 
 if __name__ == '__main__':
     main()
