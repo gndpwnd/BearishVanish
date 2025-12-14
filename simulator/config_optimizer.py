@@ -1,6 +1,6 @@
 """
-Configuration Optimizer - Finds optimal settings for your hardware
-Auto-tunes parameters for maximum performance
+Configuration Optimizer with Integrated Benchmarking
+Auto-tunes parameters for maximum performance based on hardware benchmarking
 """
 
 import numpy as np
@@ -13,17 +13,16 @@ from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, asdict
 from pathlib import Path
 import warnings
-
-from performance_profiler import get_profiler
-from memory_manager import MemoryConfig, get_memory_manager
-from parallel_processor import ParallelConfig, get_parallel_processor
-from vectorized_indicators import VectorizedIndicators
-from vectorized_strategy_base import StrategyConfig
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 
 # Type definitions
 BenchmarkResult = Dict[str, Any]
 HardwareProfile = Dict[str, Any]
 
+# Configurable paths
+BENCHMARK_CONFIG = Path('./benchmark_config.json')
+OPTIMIZATION_CONFIG = Path('./optimization_config.json')
 
 @dataclass
 class OptimizationResult:
@@ -31,14 +30,11 @@ class OptimizationResult:
     # Hardware profile
     hardware: HardwareProfile
     
-    # Optimal configurations
-    memory_config: MemoryConfig
-    parallel_config: ParallelConfig
-    strategy_configs: Dict[str, StrategyConfig]
-    
     # Performance predictions
     predicted_speedup: float
     predicted_memory_reduction: float
+    recommended_download_workers: int
+    recommended_simulation_workers: int
     
     # Benchmark results
     benchmark_results: Dict[str, BenchmarkResult]
@@ -47,43 +43,60 @@ class OptimizationResult:
     recommendations: List[str]
     estimated_calc_per_second: float
     
+    # Timestamp
+    timestamp: float = None
+    
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = time.time()
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
         return {
             'hardware': self.hardware,
-            'memory_config': asdict(self.memory_config),
-            'parallel_config': asdict(self.parallel_config),
-            'strategy_configs': {k: asdict(v) for k, v in self.strategy_configs.items()},
             'predicted_speedup': self.predicted_speedup,
             'predicted_memory_reduction': self.predicted_memory_reduction,
+            'recommended_download_workers': self.recommended_download_workers,
+            'recommended_simulation_workers': self.recommended_simulation_workers,
             'benchmark_results': self.benchmark_results,
             'recommendations': self.recommendations,
             'estimated_calc_per_second': self.estimated_calc_per_second,
-            'timestamp': time.time()
+            'timestamp': self.timestamp
         }
     
-    def save(self, filepath: str):
+    def save(self, filepath: str = None):
         """Save optimization results to file"""
+        if filepath is None:
+            filepath = BENCHMARK_CONFIG
+        
         data = self.to_dict()
         with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
+        
+        print(f"✅ Optimization results saved to: {filepath}")
     
     @classmethod
-    def load(cls, filepath: str) -> 'OptimizationResult':
+    def load(cls, filepath: str = None) -> 'OptimizationResult':
         """Load optimization results from file"""
+        if filepath is None:
+            filepath = BENCHMARK_CONFIG
+        
+        if not Path(filepath).exists():
+            return None
+        
         with open(filepath, 'r') as f:
             data = json.load(f)
         
         return cls(
             hardware=data['hardware'],
-            memory_config=MemoryConfig(**data['memory_config']),
-            parallel_config=ParallelConfig(**data['parallel_config']),
-            strategy_configs={k: StrategyConfig(**v) for k, v in data['strategy_configs'].items()},
             predicted_speedup=data['predicted_speedup'],
             predicted_memory_reduction=data['predicted_memory_reduction'],
+            recommended_download_workers=data['recommended_download_workers'],
+            recommended_simulation_workers=data['recommended_simulation_workers'],
             benchmark_results=data['benchmark_results'],
             recommendations=data['recommendations'],
-            estimated_calc_per_second=data['estimated_calc_per_second']
+            estimated_calc_per_second=data['estimated_calc_per_second'],
+            timestamp=data.get('timestamp')
         )
     
     def print_summary(self):
@@ -100,28 +113,19 @@ class OptimizationResult:
         
         if 'gpu_name' in self.hardware and self.hardware['gpu_name']:
             print(f"   GPU: {self.hardware['gpu_name']}")
-            print(f"   GPU Memory: {self.hardware.get('gpu_memory_gb', 'Unknown'):.1f} GB")
         
-        print(f"\n🎯 Optimal Configuration:")
-        print(f"   Parallel Mode: {self.parallel_config.mode}")
-        print(f"   Workers: {self.parallel_config.max_workers}")
-        print(f"   Float Precision: {'float32' if self.memory_config.use_float32 else 'float64'}")
-        print(f"   Memory Pooling: {self.memory_config.enable_pooling}")
-        print(f"   Shared Memory: {self.parallel_config.use_shared_memory}")
-        
-        print(f"\n📈 Performance Predictions:")
+        print(f"\n🎯 Performance Predictions:")
         print(f"   Speedup: {self.predicted_speedup:.1f}x")
         print(f"   Memory Reduction: {self.predicted_memory_reduction:.1f}%")
         print(f"   Estimated Calc/Sec: {self.estimated_calc_per_second:,.0f}")
         
+        print(f"\n⚡ Recommended Settings:")
+        print(f"   Download Workers: {self.recommended_download_workers}")
+        print(f"   Simulation Workers: {self.recommended_simulation_workers}")
+        
         print(f"\n💡 Recommendations:")
         for i, rec in enumerate(self.recommendations[:5], 1):
             print(f"   {i}. {rec}")
-        
-        print(f"\n📊 Benchmark Results:")
-        for benchmark_name, result in self.benchmark_results.items():
-            if 'throughput' in result:
-                print(f"   {benchmark_name}: {result['throughput']:.1f} ops/sec")
         
         print(f"{'='*70}\n")
 
@@ -129,23 +133,19 @@ class OptimizationResult:
 class ConfigOptimizer:
     """
     Auto-tunes configuration for optimal performance on your hardware
+    Combines system benchmarking with optimization recommendations
     """
     
     def __init__(self, data_manager=None, universe_manager=None):
         self.data_manager = data_manager
         self.universe_manager = universe_manager
-        self.profiler = get_profiler("config_optimizer")
         
         # Test data
         self.test_data = None
-        self.test_strategies = None
         
         # Results storage
         self.results = {}
         self.hardware_profile = {}
-        
-        # Default configurations to test
-        self.test_configs = self._get_test_configurations()
         
         print(f"🔧 Configuration Optimizer Initialized")
     
@@ -189,7 +189,7 @@ class ConfigOptimizer:
                 device = cp.cuda.runtime.getDeviceProperties(0)
                 profile['gpu_name'] = device['name'].decode('utf-8')
                 profile['gpu_memory_gb'] = device['totalGlobalMem'] / (1024**3)
-                profile['gpu_cores'] = device['multiProcessorCount'] * 64  # Approximate
+                profile['gpu_cores'] = device['multiProcessorCount'] * 64
         except ImportError:
             pass
         
@@ -205,755 +205,445 @@ class ConfigOptimizer:
         return profile
     
     def _estimate_memory_bandwidth(self) -> float:
-        """Estimate memory bandwidth (simplified)"""
-        # This is a rough estimate based on typical values
+        """Estimate memory bandwidth"""
         memory_gb = psutil.virtual_memory().total / (1024**3)
         
         if memory_gb < 8:
-            return 10.0  # ~10 GB/s for basic systems
+            return 10.0
         elif memory_gb < 32:
-            return 25.0  # ~25 GB/s for mid-range
+            return 25.0
         else:
-            return 50.0  # ~50 GB/s for high-end
-        
-        # In production, would run actual memory benchmark
+            return 50.0
     
     def _estimate_cpu_cache(self) -> float:
         """Estimate CPU cache size"""
-        # Simplified estimation
         cpu_cores = psutil.cpu_count(logical=False)
         
         if cpu_cores <= 4:
-            return 8.0  # ~8 MB L3 cache
+            return 8.0
         elif cpu_cores <= 8:
-            return 16.0  # ~16 MB L3 cache
+            return 16.0
         elif cpu_cores <= 16:
-            return 32.0  # ~32 MB L3 cache
+            return 32.0
         else:
-            return 64.0  # ~64 MB L3 cache
+            return 64.0
     
-    def _get_test_configurations(self) -> List[Dict[str, Any]]:
-        """Get list of configurations to test"""
-        base_config = {
-            'memory': MemoryConfig(),
-            'parallel': ParallelConfig(),
-            'description': 'Baseline'
+    def benchmark_network(self, test_symbols=None, num_tests=10):
+        """
+        Benchmark network speed by downloading test stocks
+        This determines optimal worker count for API downloads
+        """
+        if self.data_manager is None:
+            print("❌ Data manager not provided for network benchmark")
+            return None
+        
+        print("\n" + "="*70)
+        print("BENCHMARKING NETWORK DOWNLOAD SPEED")
+        print("="*70)
+        
+        # Get test symbols
+        if test_symbols is None:
+            if self.universe_manager:
+                all_symbols = self.universe_manager.get_approved_tickers('sp500')
+                if not all_symbols:
+                    print("❌ No symbols available for network test")
+                    return None
+                test_symbols = all_symbols[:num_tests]
+            else:
+                test_symbols = ['AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN'][:num_tests]
+        
+        print(f"Testing download speed with {len(test_symbols)} stocks...")
+        
+        end_date = datetime.now().replace(tzinfo=None)
+        start_date = (end_date - timedelta(days=30)).replace(tzinfo=None)
+        
+        # Test 1: Single-threaded download
+        print("\n1️⃣ Testing single-threaded downloads...")
+        start_time = time.time()
+        
+        successful = 0
+        for symbol in test_symbols[:min(5, len(test_symbols))]:
+            try:
+                self.data_manager.fetch_from_api(symbol, start_date, end_date)
+                successful += 1
+            except Exception as e:
+                print(f"  ⚠️  {symbol} failed: {e}")
+        
+        single_thread_time = time.time() - start_time
+        avg_time_per_stock = single_thread_time / successful if successful > 0 else 0
+        
+        print(f"  ✅ Downloaded {successful}/5 stocks in {single_thread_time:.2f}s")
+        print(f"  📊 Average: {avg_time_per_stock:.2f}s per stock")
+        
+        # Test 2: Multi-threaded download
+        print("\n2️⃣ Testing multi-threaded downloads...")
+        
+        def download_test(symbol):
+            try:
+                self.data_manager.fetch_from_api(symbol, start_date, end_date)
+                return True
+            except:
+                return False
+        
+        best_workers = 10
+        best_time = float('inf')
+        
+        for workers in [5, 10, 15, 20]:
+            print(f"\n   Testing {workers} workers...")
+            start_time = time.time()
+            
+            successful = 0
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(download_test, sym): sym 
+                          for sym in test_symbols[5:5+min(workers, len(test_symbols)-5)]}
+                for future in as_completed(futures):
+                    if future.result():
+                        successful += 1
+            
+            elapsed = time.time() - start_time
+            if successful > 0 and elapsed < best_time:
+                best_time = elapsed
+                best_workers = workers
+            
+            print(f"   ✅ {successful} stocks in {elapsed:.2f}s")
+        
+        speedup = single_thread_time / best_time if best_time > 0 else 1
+        
+        # Calculate recommended workers
+        cpu_count = psutil.cpu_count(logical=False) or 4
+        recommended_workers = min(best_workers, cpu_count * 4, 50)
+        
+        results = {
+            'single_thread_time': single_thread_time,
+            'best_parallel_time': best_time,
+            'best_workers': best_workers,
+            'avg_time_per_stock': avg_time_per_stock,
+            'speedup': speedup,
+            'recommended_download_workers': recommended_workers,
+            'timestamp': datetime.now().isoformat()
         }
         
-        test_configs = [
-            # Baseline
-            {**base_config, 'description': 'Baseline'},
-            
-            # Memory optimizations
-            {
-                'memory': MemoryConfig(
-                    use_float32=True,
-                    enable_pooling=True,
-                    aggressive_gc=True
-                ),
-                'parallel': ParallelConfig(
-                    mode='multiprocessing',
-                    use_shared_memory=False
-                ),
-                'description': 'Memory Optimized'
-            },
-            
-            # Parallel optimizations
-            {
-                'memory': MemoryConfig(use_float32=True),
-                'parallel': ParallelConfig(
-                    mode='multiprocessing',
-                    use_shared_memory=True,
-                    max_workers=max(1, psutil.cpu_count(logical=False) - 2)
-                ),
-                'description': 'Parallel Optimized'
-            },
-            
-            # GPU acceleration (if available)
-            {
-                'memory': MemoryConfig(use_float32=True),
-                'parallel': ParallelConfig(
-                    mode='gpu',
-                    max_workers=1
-                ),
-                'description': 'GPU Accelerated'
-            },
-            
-            # Maximum optimization
-            {
-                'memory': MemoryConfig(
-                    use_float32=True,
-                    enable_pooling=True,
-                    aggressive_gc=True,
-                    downcast_integers=True,
-                    use_categories=True
-                ),
-                'parallel': ParallelConfig(
-                    mode='multiprocessing',
-                    use_shared_memory=True,
-                    max_workers=max(1, psutil.cpu_count(logical=False)),
-                    chunk_size=50,
-                    dynamic_chunking=True
-                ),
-                'description': 'Maximum Optimization'
-            }
-        ]
+        print(f"\n📊 NETWORK BENCHMARK RESULTS:")
+        print(f"  Average time per stock: {avg_time_per_stock:.2f}s")
+        print(f"  Best parallel speedup: {speedup:.2f}x (with {best_workers} workers)")
+        print(f"  Recommended download workers: {recommended_workers}")
         
-        return test_configs
+        return results
     
-    def run_benchmarks(self, 
-                      test_data_size: Tuple[int, int] = (1000, 100),
-                      num_runs: int = 3) -> Dict[str, BenchmarkResult]:
+    def benchmark_computation(self, data_size: Tuple[int, int] = (10000, 10)):
         """
-        Run comprehensive benchmarks
-        
-        Args:
-            test_data_size: (n_samples, n_features) for test data
-            num_runs: Number of runs per benchmark
-        
-        Returns:
-            Dictionary of benchmark results
+        Benchmark computational performance
         """
         print(f"\n{'='*70}")
-        print("RUNNING COMPREHENSIVE BENCHMARKS")
+        print("BENCHMARKING COMPUTATIONAL PERFORMANCE")
         print(f"{'='*70}")
         
-        self.profiler.start()
-        
-        # Generate test data
-        print(f"\n📊 Generating test data ({test_data_size[0]} samples)...")
-        self.test_data = self._generate_test_data(test_data_size)
-        
-        # Run benchmarks
-        benchmark_results = {}
-        
-        # 1. Memory benchmark
-        print(f"\n1️⃣ Memory Optimization Benchmark...")
-        memory_results = self._benchmark_memory()
-        benchmark_results['memory'] = memory_results
-        
-        # 2. CPU benchmark
-        print(f"\n2️⃣ CPU/Parallelization Benchmark...")
-        cpu_results = self._benchmark_cpu()
-        benchmark_results['cpu'] = cpu_results
-        
-        # 3. Indicator calculation benchmark
-        print(f"\n3️⃣ Indicator Calculation Benchmark...")
-        indicator_results = self._benchmark_indicators()
-        benchmark_results['indicators'] = indicator_results
-        
-        # 4. Strategy simulation benchmark
-        print(f"\n4️⃣ Strategy Simulation Benchmark...")
-        strategy_results = self._benchmark_strategies()
-        benchmark_results['strategies'] = strategy_results
-        
-        # 5. End-to-end simulation benchmark
-        print(f"\n5️⃣ End-to-End Simulation Benchmark...")
-        simulation_results = self._benchmark_simulation()
-        benchmark_results['simulation'] = simulation_results
-        
-        self.profiler.stop()
-        
-        return benchmark_results
-    
-    def _generate_test_data(self, size: Tuple[int, int]) -> Dict[str, np.ndarray]:
-        """Generate test data for benchmarking"""
-        n_samples, n_features = size
-        
-        np.random.seed(42)
-        
-        return {
-            'prices': np.random.randn(n_samples, n_features).cumsum(axis=0) + 100,
-            'volumes': np.random.randint(100000, 1000000, (n_samples, n_features)),
-            'dates': np.arange(n_samples)
-        }
-    
-    def _benchmark_memory(self) -> BenchmarkResult:
-        """Benchmark memory optimization techniques"""
         results = {}
         
-        # Test data
-        test_array = np.random.randn(1000000).astype(np.float64)  # 1M elements
+        # Test NumPy performance
+        print(f"\n🧮 NumPy Performance Test...")
+        np.random.seed(42)
         
-        # Test 1: float64 vs float32
+        # Large array operations
+        arr = np.random.randn(1000000)
+        
         start = time.time()
-        for _ in range(10):
-            _ = test_array * 2.0
+        for _ in range(100):
+            _ = arr * 2.0 + 1.0
+        numpy_time = time.time() - start
+        
+        results['numpy_ops_per_sec'] = 100 / numpy_time
+        print(f"  NumPy operations: {results['numpy_ops_per_sec']:.0f} ops/sec")
+        
+        # Test Numba if available
+        try:
+            from numba import jit
+            
+            @jit(nopython=True)
+            def numba_loop(arr):
+                result = np.empty_like(arr)
+                for i in range(len(arr)):
+                    result[i] = arr[i] * 2.0 + 1.0
+                return result
+            
+            # First run includes compilation
+            _ = numba_loop(arr)
+            
+            start = time.time()
+            for _ in range(100):
+                _ = numba_loop(arr)
+            numba_time = time.time() - start
+            
+            results['numba_ops_per_sec'] = 100 / numba_time
+            results['numba_speedup'] = numpy_time / numba_time
+            print(f"  Numba operations: {results['numba_ops_per_sec']:.0f} ops/sec ({results['numba_speedup']:.1f}x)")
+        except ImportError:
+            print("  ℹ️  Numba not installed - install for 3-10x speedup")
+            results['numba_available'] = False
+        except Exception as e:
+            print(f"  ⚠️  Numba test failed: {e}")
+            results['numba_available'] = False
+        
+        return results
+    
+    def benchmark_memory(self):
+        """
+        Benchmark memory performance
+        """
+        print(f"\n{'='*70}")
+        print("BENCHMARKING MEMORY PERFORMANCE")
+        print(f"{'='*70}")
+        
+        results = {}
+        
+        # Test memory allocation speed
+        import sys
+        
+        start = time.time()
+        arrays = []
+        for i in range(1000):
+            arrays.append(np.zeros((1000, 10), dtype=np.float64))
+        allocation_time = time.time() - start
+        
+        results['allocation_speed'] = len(arrays) / allocation_time
+        results['float64_memory_mb'] = sys.getsizeof(arrays[0]) / 1024**2
+        
+        # Test float32 vs float64
+        arr64 = np.random.randn(1000000).astype(np.float64)
+        arr32 = arr64.astype(np.float32)
+        
+        start = time.time()
+        for _ in range(100):
+            _ = arr64 * 2.0
         float64_time = time.time() - start
         
-        test_array_32 = test_array.astype(np.float32)
         start = time.time()
-        for _ in range(10):
-            _ = test_array_32 * 2.0
+        for _ in range(100):
+            _ = arr32 * 2.0
         float32_time = time.time() - start
         
         results['float64_time'] = float64_time
         results['float32_time'] = float32_time
         results['float32_speedup'] = float64_time / float32_time
-        results['float32_memory_saving'] = 0.5  # 50% memory saving
+        results['float32_memory_saving'] = 0.5
         
-        # Test 2: Memory pooling
-        import sys
-        arrays = []
-        start_mem = psutil.Process().memory_info().rss
-        
-        for _ in range(100):
-            arr = np.zeros((1000, 1000), dtype=np.float32)
-            arrays.append(arr)
-        
-        end_mem = psutil.Process().memory_info().rss
-        memory_without_pool = (end_mem - start_mem) / 1024**2
-        
-        # With pooling (simulated)
-        memory_with_pool = memory_without_pool * 0.7  # 30% reduction
-        
-        results['memory_without_pool_mb'] = memory_without_pool
-        results['memory_with_pool_mb'] = memory_with_pool
-        results['pooling_saving'] = 1 - (memory_with_pool / memory_without_pool)
-        
-        # Calculate overall memory score
-        results['memory_score'] = (
-            results['float32_speedup'] * 
-            (1 + results['pooling_saving']) *
-            (1 + results['float32_memory_saving'])
-        ) / 3
-        
-        print(f"   Float32 speedup: {results['float32_speedup']:.2f}x")
-        print(f"   Pooling saving: {results['pooling_saving']*100:.1f}%")
+        print(f"  Float64: {float64_time:.3f}s")
+        print(f"  Float32: {float32_time:.3f}s ({results['float32_speedup']:.1f}x)")
+        print(f"  Memory saving with float32: {results['float32_memory_saving']*100:.0f}%")
         
         return results
     
-    def _benchmark_cpu(self) -> BenchmarkResult:
-        """Benchmark CPU and parallelization"""
-        results = {}
-        
-        # Test different parallelization modes
-        test_data = [np.random.randn(1000, 1000) for _ in range(50)]
-        
-        def compute_task(matrix):
-            return np.linalg.svd(matrix, compute_uv=False)
-        
-        # Sequential
-        start = time.time()
-        for matrix in test_data:
-            compute_task(matrix)
-        sequential_time = time.time() - start
-        
-        results['sequential_time'] = sequential_time
-        results['sequential_throughput'] = len(test_data) / sequential_time
-        
-        # Threading (if I/O bound)
-        import concurrent.futures
-        
-        start = time.time()
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            list(executor.map(compute_task, test_data))
-        threading_time = time.time() - start
-        
-        results['threading_time'] = threading_time
-        results['threading_throughput'] = len(test_data) / threading_time
-        results['threading_speedup'] = sequential_time / threading_time
-        
-        # Multiprocessing
-        start = time.time()
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            list(executor.map(compute_task, test_data))
-        multiprocessing_time = time.time() - start
-        
-        results['multiprocessing_time'] = multiprocessing_time
-        results['multiprocessing_throughput'] = len(test_data) / multiprocessing_time
-        results['multiprocessing_speedup'] = sequential_time / multiprocessing_time
-        
-        # Calculate CPU score
-        cpu_cores = psutil.cpu_count(logical=False)
-        ideal_speedup = cpu_cores * 0.8  # 80% efficiency
-        
-        actual_speedup = results['multiprocessing_speedup']
-        parallel_efficiency = actual_speedup / ideal_speedup
-        
-        results['cpu_cores'] = cpu_cores
-        results['ideal_speedup'] = ideal_speedup
-        results['parallel_efficiency'] = parallel_efficiency
-        results['cpu_score'] = parallel_efficiency * actual_speedup
-        
-        print(f"   CPU Cores: {cpu_cores}")
-        print(f"   Multiprocessing speedup: {actual_speedup:.2f}x")
-        print(f"   Parallel efficiency: {parallel_efficiency*100:.1f}%")
-        
-        return results
-    
-    def _benchmark_indicators(self) -> BenchmarkResult:
-        """Benchmark indicator calculations"""
-        results = {}
-        
-        # Create test data
-        n_bars = 10000
-        test_df = pd.DataFrame({
-            'open': np.random.randn(n_bars).cumsum() + 100,
-            'high': np.random.randn(n_bars).cumsum() + 105,
-            'low': np.random.randn(n_bars).cumsum() + 95,
-            'close': np.random.randn(n_bars).cumsum() + 100,
-            'volume': np.random.randint(100000, 1000000, n_bars)
-        })
-        
-        # Test sequential calculation
-        start = time.time()
-        
-        # Calculate some indicators sequentially
-        test_df['sma_20'] = test_df['close'].rolling(20).mean()
-        test_df['sma_50'] = test_df['close'].rolling(50).mean()
-        test_df['rsi'] = self._calculate_rsi_sequential(test_df['close'])
-        
-        sequential_time = time.time() - start
-        
-        # Test vectorized calculation
-        indicator_lib = VectorizedIndicators(use_numba=True)
-        
-        start = time.time()
-        vectorized_results = indicator_lib.calculate_all(
-            test_df, 
-            ['sma', 'rsi', 'bollinger_bands']
-        )
-        vectorized_time = time.time() - start
-        
-        results['sequential_time'] = sequential_time
-        results['vectorized_time'] = vectorized_time
-        results['vectorized_speedup'] = sequential_time / vectorized_time
-        results['indicators_per_second'] = len(vectorized_results) / vectorized_time
-        
-        # Calculate indicator score
-        results['indicator_score'] = results['vectorized_speedup'] * results['indicators_per_second'] / 100
-        
-        print(f"   Vectorized speedup: {results['vectorized_speedup']:.2f}x")
-        print(f"   Indicators/sec: {results['indicators_per_second']:.1f}")
-        
-        return results
-    
-    def _calculate_rsi_sequential(self, prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate RSI sequentially (for benchmarking)"""
-        deltas = prices.diff()
-        gain = (deltas.where(deltas > 0, 0)).rolling(period).mean()
-        loss = (-deltas.where(deltas < 0, 0)).rolling(period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    def _benchmark_strategies(self) -> BenchmarkResult:
-        """Benchmark strategy performance"""
-        results = {}
-        
-        # This would test actual strategy performance
-        # For now, simulate with simple operations
-        n_iterations = 1000000
-        
-        # Python loops (baseline)
-        start = time.time()
-        total = 0
-        for i in range(n_iterations):
-            total += i * 0.5
-        python_time = time.time() - start
-        
-        # NumPy vectorized
-        start = time.time()
-        arr = np.arange(n_iterations, dtype=np.float32)
-        total = np.sum(arr * 0.5)
-        numpy_time = time.time() - start
-        
-        # Numba JIT
-        from numba import jit
-        
-        @jit(nopython=True)
-        def numba_sum(n):
-            total = 0.0
-            for i in range(n):
-                total += i * 0.5
-            return total
-        
-        start = time.time()
-        total = numba_sum(n_iterations)
-        numba_time = time.time() - start
-        
-        results['python_time'] = python_time
-        results['numpy_time'] = numpy_time
-        results['numba_time'] = numba_time
-        results['numpy_speedup'] = python_time / numpy_time
-        results['numba_speedup'] = python_time / numba_time
-        
-        # Calculate strategy score
-        results['strategy_score'] = (results['numpy_speedup'] + results['numba_speedup']) / 2
-        
-        print(f"   NumPy speedup: {results['numpy_speedup']:.2f}x")
-        print(f"   Numba speedup: {results['numba_speedup']:.2f}x")
-        
-        return results
-    
-    def _benchmark_simulation(self) -> BenchmarkResult:
-        """Benchmark end-to-end simulation"""
-        results = {}
-        
-        # Simulate different configuration scenarios
-        config_scenarios = [
-            {'workers': 1, 'use_numba': False, 'use_float32': False},
-            {'workers': 4, 'use_numba': True, 'use_float32': False},
-            {'workers': 8, 'use_numba': True, 'use_float32': True},
-            {'workers': 16, 'use_numba': True, 'use_float32': True},
-        ]
-        
-        base_throughput = 9000  # Your current baseline
-        
-        for scenario in config_scenarios:
-            # Estimate performance based on hardware
-            workers = scenario['workers']
-            use_numba = scenario['use_numba']
-            use_float32 = scenario['use_float32']
-            
-            # Simple performance model
-            worker_factor = min(workers, psutil.cpu_count(logical=False))
-            numba_factor = 3.0 if use_numba else 1.0
-            memory_factor = 1.2 if use_float32 else 1.0
-            
-            estimated_throughput = base_throughput * worker_factor * numba_factor * memory_factor
-            
-            scenario_name = f"w{workers}_n{use_numba}_f{use_float32}"
-            results[scenario_name] = {
-                'estimated_throughput': estimated_throughput,
-                'estimated_speedup': estimated_throughput / base_throughput
-            }
-        
-        # Calculate simulation score
-        best_scenario = max(results.items(), key=lambda x: x[1]['estimated_throughput'])
-        results['best_throughput'] = best_scenario[1]['estimated_throughput']
-        results['best_speedup'] = best_scenario[1]['estimated_speedup']
-        results['simulation_score'] = best_scenario[1]['estimated_speedup']
-        
-        print(f"   Best estimated speedup: {results['best_speedup']:.2f}x")
-        print(f"   Best estimated throughput: {results['best_throughput']:,.0f} calc/sec")
-        
-        return results
-    
-    def find_optimal_configuration(self, benchmark_results: Dict[str, BenchmarkResult]) -> OptimizationResult:
-        """Find optimal configuration based on benchmark results"""
+    def run_comprehensive_benchmark(self):
+        """
+        Run comprehensive system benchmark
+        """
         print(f"\n{'='*70}")
-        print("FINDING OPTIMAL CONFIGURATION")
+        print("RUNNING COMPREHENSIVE SYSTEM BENCHMARK")
+        print(f"{'='*70}")
+        print("This will take about 30-60 seconds...")
+        
+        # 1. Hardware profile
+        print(f"\n{'='*70}")
+        print("SYSTEM INFORMATION")
         print(f"{'='*70}")
         
-        # Get hardware profile
-        self.hardware_profile = self._get_hardware_profile()
+        hardware_profile = self._get_hardware_profile()
+        self.hardware_profile = hardware_profile
         
-        # Analyze benchmarks
-        memory_results = benchmark_results.get('memory', {})
-        cpu_results = benchmark_results.get('cpu', {})
-        indicator_results = benchmark_results.get('indicators', {})
-        strategy_results = benchmark_results.get('strategies', {})
-        simulation_results = benchmark_results.get('simulation', {})
+        print(f"  CPU: {hardware_profile['cpu_name']}")
+        print(f"  Cores: {hardware_profile['cpu_cores']}")
+        print(f"  RAM: {hardware_profile['total_memory_gb']:.1f} GB")
+        print(f"  OS: {hardware_profile['os']}")
         
-        # Determine optimal settings
-        optimal_memory = self._determine_optimal_memory(memory_results)
-        optimal_parallel = self._determine_optimal_parallel(cpu_results)
-        optimal_strategies = self._determine_optimal_strategies(strategy_results)
+        if hardware_profile.get('gpu_name'):
+            print(f"  GPU: {hardware_profile['gpu_name']}")
         
-        # Calculate predicted improvements
-        predicted_speedup = simulation_results.get('best_speedup', 1.0)
-        predicted_memory_reduction = memory_results.get('float32_memory_saving', 0) * 100
+        # 2. Network benchmark
+        network_results = self.benchmark_network()
+        
+        # 3. Computation benchmark
+        compute_results = self.benchmark_computation()
+        
+        # 4. Memory benchmark
+        memory_results = self.benchmark_memory()
+        
+        # Compile results
+        benchmark_results = {
+            'hardware': hardware_profile,
+            'network': network_results,
+            'computation': compute_results,
+            'memory': memory_results,
+            'timestamp': datetime.now().isoformat()
+        }
         
         # Generate recommendations
-        recommendations = self._generate_recommendations(
-            memory_results, cpu_results, indicator_results, strategy_results, simulation_results
-        )
+        optimization_result = self._generate_recommendations(benchmark_results)
+        
+        # Save results
+        optimization_result.save()
+        
+        # Print summary
+        optimization_result.print_summary()
+        
+        # Also save optimization config
+        self._save_optimization_config(optimization_result)
+        
+        return optimization_result
+    
+    def _generate_recommendations(self, benchmark_results: Dict) -> OptimizationResult:
+        """Generate optimization recommendations based on benchmark results"""
+        hardware = benchmark_results['hardware']
+        network = benchmark_results.get('network', {})
+        compute = benchmark_results.get('computation', {})
+        memory = benchmark_results.get('memory', {})
+        
+        # Calculate recommendations
+        cpu_cores = hardware.get('cpu_cores', 4)
+        total_ram_gb = hardware.get('total_memory_gb', 8)
+        
+        # Network workers
+        recommended_download = network.get('recommended_download_workers', min(cpu_cores * 2, 20))
+        
+        # Simulation workers (different from download workers)
+        recommended_simulation = max(1, cpu_cores - 2)
+        
+        # Performance predictions
+        predicted_speedup = 1.0
+        
+        if compute.get('numba_available', False) and compute.get('numba_speedup', 1) > 2:
+            predicted_speedup *= compute['numba_speedup']
+        
+        if memory.get('float32_speedup', 1) > 1.2:
+            predicted_speedup *= 1.2
+        
+        predicted_speedup *= (recommended_simulation * 0.8)  # 80% parallel efficiency
+        
+        predicted_memory_reduction = memory.get('float32_memory_saving', 0) * 100
         
         # Estimate calculations per second
-        base_calc_per_sec = 9000  # Your current baseline
+        base_calc_per_sec = 9000
         estimated_calc_per_sec = base_calc_per_sec * predicted_speedup
         
-        # Create result object
-        result = OptimizationResult(
-            hardware=self.hardware_profile,
-            memory_config=optimal_memory,
-            parallel_config=optimal_parallel,
-            strategy_configs=optimal_strategies,
+        # Generate recommendations
+        recommendations = []
+        
+        # Network recommendations
+        recommendations.append(f"Use {recommended_download} workers for data downloads")
+        
+        # Computation recommendations
+        if compute.get('numba_available', False):
+            recommendations.append("Enable Numba JIT compilation for 3-10x speedup")
+        else:
+            recommendations.append("Install Numba: pip install numba")
+        
+        # Memory recommendations
+        if memory.get('float32_speedup', 1) > 1.2:
+            recommendations.append("Use float32 data types for 50% memory reduction")
+        
+        if total_ram_gb < 16:
+            recommendations.append(f"Consider upgrading to 16GB+ RAM (current: {total_ram_gb:.1f}GB)")
+        
+        # General performance
+        recommendations.append(f"Expected speedup: {predicted_speedup:.1f}x ({estimated_calc_per_sec:,.0f} calc/sec)")
+        
+        return OptimizationResult(
+            hardware=hardware,
             predicted_speedup=predicted_speedup,
             predicted_memory_reduction=predicted_memory_reduction,
+            recommended_download_workers=recommended_download,
+            recommended_simulation_workers=recommended_simulation,
             benchmark_results=benchmark_results,
             recommendations=recommendations,
             estimated_calc_per_second=estimated_calc_per_sec
         )
-        
-        return result
     
-    def _determine_optimal_memory(self, memory_results: BenchmarkResult) -> MemoryConfig:
-        """Determine optimal memory configuration"""
-        use_float32 = memory_results.get('float32_speedup', 1) > 1.2
-        enable_pooling = memory_results.get('pooling_saving', 0) > 0.1
+    def _save_optimization_config(self, optimization_result: OptimizationResult):
+        """Save optimization configuration file"""
+        config = {
+            'use_numba': True,
+            'use_float32': optimization_result.predicted_memory_reduction > 20,
+            'parallel_workers': {
+                'download': optimization_result.recommended_download_workers,
+                'simulation': optimization_result.recommended_simulation_workers
+            },
+            'precompute_indicators': True,
+            'batch_database_operations': True,
+            'memory_optimization': {
+                'aggressive_gc': optimization_result.hardware.get('total_memory_gb', 0) < 8
+            },
+            'profiling': {
+                'enabled': False,
+                'output_dir': './profiling'
+            },
+            'benchmark_timestamp': optimization_result.timestamp
+        }
         
-        return MemoryConfig(
-            use_float32=use_float32,
-            enable_pooling=enable_pooling,
-            downcast_integers=True,
-            use_categories=True,
-            aggressive_gc=True,
-            max_memory_mb=int(self.hardware_profile.get('total_memory_gb', 8) * 1024 * 0.7)  # 70% of RAM
-        )
+        with open(OPTIMIZATION_CONFIG, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        print(f"✅ Optimization configuration saved to: {OPTIMIZATION_CONFIG}")
     
-    def _determine_optimal_parallel(self, cpu_results: BenchmarkResult) -> ParallelConfig:
-        """Determine optimal parallel configuration"""
-        cpu_cores = self.hardware_profile.get('cpu_cores', 4)
-        has_gpu = self.hardware_profile.get('gpu_name') is not None
-        
-        # Choose mode
-        if has_gpu and cpu_results.get('multiprocessing_speedup', 1) < 8:
-            mode = 'gpu'
-            max_workers = 1
-        elif cpu_cores > 4 and cpu_results.get('multiprocessing_speedup', 1) > 2:
-            mode = 'multiprocessing'
-            max_workers = max(1, cpu_cores - 2)
-        else:
-            mode = 'threading'
-            max_workers = cpu_cores * 2
-        
-        use_shared_memory = (
-            mode == 'multiprocessing' and 
-            self.hardware_profile.get('total_memory_gb', 0) > 8
-        )
-        
-        return ParallelConfig(
-            mode=mode,
-            max_workers=max_workers,
-            use_shared_memory=use_shared_memory,
-            chunk_size=max(10, 100 // max_workers),
-            dynamic_chunking=True
-        )
-    
-    def _determine_optimal_strategies(self, strategy_results: BenchmarkResult) -> Dict[str, StrategyConfig]:
-        """Determine optimal strategy configurations"""
-        use_numba = strategy_results.get('numba_speedup', 1) > 2
-        
-        base_config = StrategyConfig(
-            use_numba=use_numba,
-            position_size_pct=0.10,
-            max_positions=10
-        )
+    def get_recommended_settings(self):
+        """Get recommended settings from saved benchmark"""
+        result = OptimizationResult.load()
+        if result is None:
+            # Return defaults
+            cpu_cores = psutil.cpu_count(logical=False) or 4
+            return {
+                'download_workers': min(cpu_cores * 2, 20),
+                'simulation_workers': max(1, cpu_cores - 2),
+                'use_numba': True,
+                'use_float32': False
+            }
         
         return {
-            'default': base_config,
-            'aggressive': StrategyConfig(
-                use_numba=use_numba,
-                position_size_pct=0.20,
-                max_positions=5
-            ),
-            'conservative': StrategyConfig(
-                use_numba=use_numba,
-                position_size_pct=0.05,
-                max_positions=20
-            )
+            'download_workers': result.recommended_download_workers,
+            'simulation_workers': result.recommended_simulation_workers,
+            'use_numba': True,
+            'use_float32': result.predicted_memory_reduction > 20
         }
     
-    def _generate_recommendations(self, 
-                                 memory_results: BenchmarkResult,
-                                 cpu_results: BenchmarkResult,
-                                 indicator_results: BenchmarkResult,
-                                 strategy_results: BenchmarkResult,
-                                 simulation_results: BenchmarkResult) -> List[str]:
-        """Generate optimization recommendations"""
-        recommendations = []
+    @staticmethod
+    def load_config():
+        """Load optimization configuration"""
+        if not OPTIMIZATION_CONFIG.exists():
+            # Return default config
+            cpu_cores = psutil.cpu_count(logical=False) or 4
+            return {
+                'use_numba': True,
+                'use_float32': False,
+                'parallel_workers': {
+                    'download': min(cpu_cores * 2, 20),
+                    'simulation': max(1, cpu_cores - 2)
+                },
+                'precompute_indicators': True,
+                'batch_database_operations': True,
+                'memory_optimization': {'aggressive_gc': False},
+                'profiling': {'enabled': False, 'output_dir': './profiling'}
+            }
         
-        # Memory recommendations
-        if memory_results.get('float32_speedup', 1) > 1.5:
-            recommendations.append("Use float32 instead of float64 for 50% memory saving and faster computation")
-        
-        if memory_results.get('pooling_saving', 0) > 0.2:
-            recommendations.append("Enable memory pooling to reduce allocation overhead by 20-30%")
-        
-        # CPU recommendations
-        cpu_cores = self.hardware_profile.get('cpu_cores', 4)
-        if cpu_cores > 4 and cpu_results.get('multiprocessing_speedup', 1) > 3:
-            recommendations.append(f"Use multiprocessing with {cpu_cores-2} workers for {cpu_results['multiprocessing_speedup']:.1f}x speedup")
-        
-        # Indicator recommendations
-        if indicator_results.get('vectorized_speedup', 1) > 5:
-            recommendations.append("Use vectorized indicator calculations for 5-10x faster indicator computation")
-        
-        # Strategy recommendations
-        if strategy_results.get('numba_speedup', 1) > 3:
-            recommendations.append("Use Numba JIT compilation for 3-10x faster strategy execution")
-        
-        # GPU recommendations
-        if self.hardware_profile.get('gpu_name'):
-            recommendations.append(f"Use GPU acceleration with {self.hardware_profile['gpu_name']} for compute-intensive operations")
-        
-        # General recommendations
-        total_memory_gb = self.hardware_profile.get('total_memory_gb', 0)
-        if total_memory_gb < 16:
-            recommendations.append(f"Consider upgrading to at least 16GB RAM (current: {total_memory_gb:.1f}GB)")
-        
-        if cpu_cores < 8:
-            recommendations.append(f"Consider upgrading to a CPU with more cores (current: {cpu_cores})")
-        
-        # Performance target
-        estimated_speedup = simulation_results.get('best_speedup', 1)
-        if estimated_speedup > 10:
-            recommendations.append(f"Expected performance: {estimated_speedup:.1f}x speedup ({simulation_results.get('best_throughput', 0):,.0f} calc/sec)")
-        else:
-            recommendations.append(f"Target 10x speedup. Current estimate: {estimated_speedup:.1f}x")
-        
-        return recommendations
-    
-    def apply_configuration(self, optimization_result: OptimizationResult):
-        """Apply optimal configuration to simulation system"""
-        print(f"\n{'='*70}")
-        print("APPLYING OPTIMAL CONFIGURATION")
-        print(f"{'='*70}")
-        
-        # Apply memory configuration
-        memory_manager = get_memory_manager(optimization_result.memory_config)
-        print(f"✅ Applied memory configuration:")
-        print(f"   Float32: {optimization_result.memory_config.use_float32}")
-        print(f"   Memory Pooling: {optimization_result.memory_config.enable_pooling}")
-        
-        # Apply parallel configuration
-        parallel_processor = get_parallel_processor(optimization_result.parallel_config)
-        print(f"✅ Applied parallel configuration:")
-        print(f"   Mode: {optimization_result.parallel_config.mode}")
-        print(f"   Workers: {optimization_result.parallel_config.max_workers}")
-        
-        # Save configuration file
-        config_file = Path('./optimal_config.json')
-        optimization_result.save(config_file)
-        
-        print(f"✅ Configuration saved to: {config_file}")
-        
-        # Create example usage code
-        example_code = self._generate_example_code(optimization_result)
-        example_file = Path('./optimized_simulation_example.py')
-        example_file.write_text(example_code)
-        
-        print(f"✅ Example code generated: {example_file}")
-        print(f"{'='*70}\n")
-        
-        return {
-            'memory_manager': memory_manager,
-            'parallel_processor': parallel_processor,
-            'config_file': config_file,
-            'example_file': example_file
-        }
-    
-    def _generate_example_code(self, optimization_result: OptimizationResult) -> str:
-        """Generate example code for using optimized configuration"""
-        example = f'''"""
-Optimized Simulation Example
-Generated by ConfigOptimizer
-Expected speedup: {optimization_result.predicted_speedup:.1f}x
-Estimated performance: {optimization_result.estimated_calc_per_second:,.0f} calculations/second
-"""
+        with open(OPTIMIZATION_CONFIG, 'r') as f:
+            return json.load(f)
 
-import numpy as np
-import pandas as pd
-from pathlib import Path
 
-# Import optimized modules
-from memory_manager import get_memory_manager
-from parallel_processor import get_parallel_processor
-from vectorized_indicators import get_indicator_library
-from vectorized_simulator import VectorizedSimulator, SimulationConfig
-from vectorized_strategy_base import VectorizedStrategyBase, StrategyConfig
+# Convenience functions
+def optimize_system(data_manager=None, universe_manager=None):
+    """Main function to optimize system configuration"""
+    optimizer = ConfigOptimizer(data_manager, universe_manager)
+    return optimizer.run_comprehensive_benchmark()
 
-def run_optimized_simulation(data_manager, universe_manager, strategies, symbols):
-    """
-    Run simulation with optimized configuration
-    """
-    
-    # 1. Initialize optimized managers
-    memory_manager = get_memory_manager()
-    parallel_processor = get_parallel_processor()
-    indicator_library = get_indicator_library(use_numba=True, cache_results=True)
-    
-    print(f"🧠 Memory Manager: float32={memory_manager.config.use_float32}, pooling={memory_manager.config.enable_pooling}")
-    print(f"⚡ Parallel Processor: mode={parallel_processor.config.mode}, workers={parallel_processor.config.max_workers}")
-    print(f"📊 Indicator Library: numba={indicator_library.use_numba}, caching={indicator_library.cache_results}")
-    
-    # 2. Configure simulator
-    sim_config = SimulationConfig(
-        use_parallel=True,
-        max_workers={optimization_result.parallel_config.max_workers},
-        use_numba=True,
-        float_precision='float32' if {optimization_result.memory_config.use_float32} else 'float64',
-        use_memory_pooling={optimization_result.memory_config.enable_pooling},
-        cache_indicators=True,
-        verbose=True
-    )
-    
-    # 3. Create vectorized simulator
-    simulator = VectorizedSimulator(
-        data_manager=data_manager,
-        universe_manager=universe_manager,
-        config=sim_config
-    )
-    
-    # 4. Set indicator library for strategies
-    for strategy in strategies:
-        strategy.set_indicator_library(indicator_library)
-    
-    # 5. Run simulation
-    print(f"\\n{'='*70}")
-    print(f"STARTING OPTIMIZED SIMULATION")
-    print(f"{'='*70}")
-    print(f"Expected speedup: {optimization_result.predicted_speedup:.1f}x")
-    print(f"Target performance: {optimization_result.estimated_calc_per_second:,.0f} calc/sec")
-    print(f"{'='*70}\\n")
-    
-    result = simulator.run_simulation(
-        strategies=strategies,
-        symbols=symbols,
-        start_date=None,
-        end_date=None,
-        universe_filter='sp500'  # Or your preferred universe
-    )
-    
-    return result
+def get_optimized_settings():
+    """Get optimized settings for simulation"""
+    optimizer = ConfigOptimizer()
+    return optimizer.get_recommended_settings()
 
-# Example strategy configuration
-def create_optimized_strategies():
-    """Create strategies with optimized configuration"""
-    
-    # Momentum strategy
-    momentum_config = StrategyConfig(
-        name="Optimized Momentum",
-        initial_capital=100000,
-        position_size_pct=0.10,
-        max_positions=10,
-        use_numba=True,  # Use Numba for speed
-        precompute_indicators=True  # Pre-compute indicators
-    )
-    
-    # You would create your actual strategy classes here
-    # For example:
-    # from your_strategies import VectorizedMomentumStrategy
-    # momentum_strategy = VectorizedMomentumStrategy(config=momentum_config)
-    
-    return []  # Return your strategy instances
+def load_optimization_config():
+    """Load optimization configuration"""
+    return ConfigOptimizer.load_config()
+
 
 if __name__ == "__main__":
-    print("Optimized simulation setup complete!")
-    print(f"Hardware: {optimization_result.hardware.get('cpu_name', 'Unknown')}")
-    print(f"CPU Cores: {optimization_result.hardware.get('cpu_cores', 'Unknown')}")
-    print(f"RAM: {optimization_result.hardware.get('total_memory_gb', 'Unknown'):.1f} GB")
-    
-    if optimization_result.hardware.get('gpu_name'):
-        print(f"GPU: {optimization_result.hardware['gpu_name']}")
-    
-    print("\\nTo use:")
-    print("1. Import your data_manager and universe_manager")
-    print("2. Create your vectorized strategies")
-    print("3. Call run_optimized_simulation()")
-'''
-        
-        return example
-
-
-# Main function for standalone usage
-def optimize_system():
-    """Main function to optimize system configuration"""
-    optimizer = ConfigOptimizer()
-    
+    # Run optimization standalone
     print(f"\n{'='*70}")
     print("AUTO-CONFIGURATION OPTIMIZER")
     print(f"{'='*70}")
@@ -961,28 +651,12 @@ def optimize_system():
     print("Estimated time: 2-5 minutes")
     print(f"{'='*70}\n")
     
-    # Run benchmarks
-    benchmark_results = optimizer.run_benchmarks()
-    
-    # Find optimal configuration
-    optimal_config = optimizer.find_optimal_configuration(benchmark_results)
-    
-    # Print results
-    optimal_config.print_summary()
-    
-    # Apply configuration
-    optimizer.apply_configuration(optimal_config)
-    
-    return optimal_config
-
-
-if __name__ == "__main__":
-    # Run optimization
     result = optimize_system()
     
-    print("\n🎯 Optimization Complete!")
-    print("Next steps:")
-    print("1. Review optimal_config.json")
-    print("2. Check optimized_simulation_example.py")
-    print("3. Update your main.py to use optimized configuration")
-    print("4. Run simulation and verify performance improvement")
+    if result:
+        print("\n🎯 Optimization Complete!")
+        print("Next steps:")
+        print("1. Review benchmark_config.json for detailed results")
+        print("2. Review optimization_config.json for settings")
+        print("3. Update your simulation to use optimized settings")
+        print("4. Run simulation and verify performance improvement")

@@ -27,3 +27,4 @@ pyperclip
 numba
 line-profiler
 memory-profiler
+networkx

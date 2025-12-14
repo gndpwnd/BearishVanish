@@ -8,6 +8,8 @@ import inspect
 from pathlib import Path
 from typing import Dict, List, Any, Callable, Type
 import networkx as nx
+import pandas as pd
+import numpy as np
 
 from indicator_base import IndicatorBase, BUILTIN_FUNCTIONS, BUILTIN_CLASSES
 
