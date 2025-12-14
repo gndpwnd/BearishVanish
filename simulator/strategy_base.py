@@ -4,9 +4,25 @@ All strategies should inherit from this class and implement the on_data method.
 """
 
 class StrategyBase:
-    def __init__(self, name="Strategy", color="blue"):
+    def __init__(self, name="Strategy", color="blue", 
+                 initial_capital=100000, 
+                 position_size_pct=0.10, 
+                 max_positions=10):
+        """
+        Initialize strategy with customizable parameters.
+        
+        Args:
+            name: Strategy name
+            color: Display color for charts
+            initial_capital: Starting capital for this strategy
+            position_size_pct: Percentage of portfolio allocated per position (0-1)
+            max_positions: Maximum number of concurrent positions
+        """
         self.name = name
         self.color = color
+        self.initial_capital = initial_capital
+        self.position_size_pct = position_size_pct
+        self.max_positions = max_positions
         self.reset()
     
     def reset(self):
@@ -17,7 +33,17 @@ class StrategyBase:
         # Debug tracking
         self.attempted_signals = {}  # Track all signal attempts
         self.blocked_signals = {}  # Track blocked signals
-        
+    
+    def get_config(self):
+        """Return strategy configuration for telemetry"""
+        return {
+            'name': self.name,
+            'color': self.color,
+            'initial_capital': self.initial_capital,
+            'position_size_pct': self.position_size_pct,
+            'max_positions': self.max_positions
+        }
+    
     def on_data(self, stock_data, spy_data, current_date, symbol):
         """
         Called on each new data point during simulation.
@@ -89,13 +115,18 @@ class StrategyBase:
             'symbols_with_executions': len(self.last_executed_signal),
             'symbols_with_blocks': len(self.blocked_signals),
             'total_attempts': sum(len(v) for v in self.attempted_signals.values()),
-            'total_blocks': sum(len(v) for v in self.blocked_signals.values())
+            'total_blocks': sum(len(v) for v in self.blocked_signals.values()),
+            'config': self.get_config()
         }
     
     def print_debug_stats(self):
         """Print debug statistics"""
         stats = self.get_debug_stats()
-        print(f"\n📊 {self.name} Signal Statistics:")
+        print(f"\n📊 {self.name} Configuration:")
+        print(f"   Initial Capital: ${self.initial_capital:,.0f}")
+        print(f"   Position Size: {self.position_size_pct*100:.1f}%")
+        print(f"   Max Positions: {self.max_positions}")
+        print(f"\n   Signal Statistics:")
         print(f"   Symbols with signal attempts: {stats['symbols_with_attempts']}")
         print(f"   Symbols with executions: {stats['symbols_with_executions']}")
         print(f"   Symbols with blocked signals: {stats['symbols_with_blocks']}")

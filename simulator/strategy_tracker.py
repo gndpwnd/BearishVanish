@@ -26,6 +26,13 @@ class StrategyTracker:
         self.position_size_pct = position_size_pct
         self.max_positions = max_positions
         
+        # Store strategy configuration for telemetry
+        self.strategy_config = {
+            'initial_capital': initial_cash,
+            'position_size_pct': position_size_pct,
+            'max_positions': max_positions
+        }
+        
         self.positions = {}  # symbol: shares
         self.trades = []  # List of trade dicts
         self.portfolio_value_history = []
@@ -38,19 +45,10 @@ class StrategyTracker:
         """Count non-zero positions"""
         return sum(1 for shares in self.positions.values() if shares > 0)
     
+    # In strategy_tracker.py, modify the execute_trade method to print debug info:
     def execute_trade(self, symbol, signal, price, date, force=False):
         """
         Execute trade with SMART POSITION SIZING and return success status
-        
-        Args:
-            symbol: Stock symbol
-            signal: 'BUY' or 'SELL'
-            price: Current price
-            date: Current date
-            force: If True, bypass position limits (for forced liquidation)
-            
-        Returns:
-            bool: True if trade executed, False if blocked
         """
         
         if signal == 'BUY' and self.cash > 0:
@@ -60,6 +58,7 @@ class StrategyTracker:
                 if current_positions >= self.max_positions:
                     # Only block if opening a NEW position
                     if symbol not in self.positions or self.positions.get(symbol, 0) == 0:
+                        print(f"❌ {self.name}: BUY {symbol} BLOCKED - Max positions reached ({current_positions}/{self.max_positions})")
                         return False  # Blocked by max positions
             
             # Calculate allocation based on PORTFOLIO value, not just cash
@@ -71,26 +70,32 @@ class StrategyTracker:
             # Ensure we don't exceed available cash
             allocation = min(allocation, self.cash)
             
-            if allocation >= 100:  # Minimum position size
-                shares = round(allocation / price, 2)  # Fractional shares
-                actual_cost = shares * price
+            if allocation < 100:  # Minimum position size
+                print(f"❌ {self.name}: BUY {symbol} BLOCKED - Insufficient allocation (${allocation:.2f} < $100)")
+                return False
                 
-                if actual_cost <= self.cash:
-                    self.positions[symbol] = self.positions.get(symbol, 0) + shares
-                    self.cash -= actual_cost
-                    self.position_values[symbol] = actual_cost
-                    
-                    self.trades.append({
-                        'date': date, 
-                        'symbol': symbol, 
-                        'action': 'BUY',
-                        'price': price, 
-                        'shares': shares,
-                        'cost': actual_cost,
-                        'forced': force
-                    })
-                    return True  # Trade succeeded
-            return False  # Insufficient allocation
+            shares = round(allocation / price, 2)  # Fractional shares
+            actual_cost = shares * price
+            
+            if actual_cost > self.cash:
+                print(f"❌ {self.name}: BUY {symbol} BLOCKED - Insufficient cash (${actual_cost:.2f} > ${self.cash:.2f})")
+                return False
+                
+            self.positions[symbol] = self.positions.get(symbol, 0) + shares
+            self.cash -= actual_cost
+            self.position_values[symbol] = actual_cost
+            
+            self.trades.append({
+                'date': date, 
+                'symbol': symbol, 
+                'action': 'BUY',
+                'price': price, 
+                'shares': shares,
+                'cost': actual_cost,
+                'forced': force
+            })
+            print(f"✅ {self.name}: BOUGHT {shares:.2f} shares of {symbol} at ${price:.2f} (${actual_cost:.2f})")
+            return True  # Trade succeeded
                     
         elif signal == 'SELL' and self.positions.get(symbol, 0) > 0:
             shares = self.positions[symbol]
@@ -110,10 +115,15 @@ class StrategyTracker:
                 'proceeds': proceeds,
                 'forced': force
             })
+            print(f"✅ {self.name}: SOLD {shares:.2f} shares of {symbol} at ${price:.2f} (${proceeds:.2f})")
             return True  # Trade succeeded
         
+        elif signal == 'SELL' and self.positions.get(symbol, 0) <= 0:
+            print(f"❌ {self.name}: SELL {symbol} BLOCKED - No position to sell")
+            return False
+            
         return False  # No trade executed
-    
+
     def get_current_portfolio_value(self, current_prices):
         """Calculate current portfolio value including cash and positions"""
         total_value = self.cash
@@ -179,8 +189,9 @@ class StrategyTracker:
     def get_num_sells(self):
         return sum(1 for t in self.trades if t['action'] == 'SELL')
     
+    # Replace the existing get_win_rate() method with this:
     def get_win_rate(self):
-        """Calculate win rate based on completed trades (buy-sell pairs)"""
+        """Calculate win rate PROPERLY - only completed buy-sell pairs"""
         wins = 0
         total_completed = 0
         
@@ -188,9 +199,13 @@ class StrategyTracker:
         for symbol in set(t['symbol'] for t in self.trades):
             symbol_trades = [t for t in self.trades if t['symbol'] == symbol]
             
-            # Match buys with sells
+            # Sort by date to ensure proper pairing
+            symbol_trades.sort(key=lambda x: x['date'])
+            
+            # Match buy-sell pairs sequentially
             i = 0
             while i < len(symbol_trades) - 1:
+                # Look for BUY-SELL pair
                 if symbol_trades[i]['action'] == 'BUY' and symbol_trades[i+1]['action'] == 'SELL':
                     buy_price = symbol_trades[i]['price']
                     sell_price = symbol_trades[i+1]['price']
@@ -198,12 +213,13 @@ class StrategyTracker:
                     if sell_price > buy_price:
                         wins += 1
                     total_completed += 1
-                    i += 2
+                    i += 2  # Skip both the buy and sell
                 else:
+                    # Not a buy-sell pair, skip this trade
                     i += 1
         
         return (wins / total_completed * 100) if total_completed > 0 else 0
-    
+        
     def get_max_drawdown(self):
         """Calculate maximum drawdown percentage"""
         if not self.portfolio_value_history:
@@ -693,3 +709,58 @@ class StrategyTracker:
             }
         
         return stock_summary
+    
+
+    def get_realized_profit(self):
+        """Calculate ONLY profit from closed trades"""
+        realized = 0
+        
+        for symbol in set(t['symbol'] for t in self.trades):
+            symbol_trades = [t for t in self.trades if t['symbol'] == symbol]
+            symbol_trades.sort(key=lambda x: x['date'])
+            
+            i = 0
+            while i < len(symbol_trades) - 1:
+                if symbol_trades[i]['action'] == 'BUY' and symbol_trades[i+1]['action'] == 'SELL':
+                    buy_price = symbol_trades[i]['price']
+                    sell_price = symbol_trades[i+1]['price']
+                    shares = symbol_trades[i]['shares']
+                    realized += (sell_price - buy_price) * shares
+                    i += 2
+                else:
+                    i += 1
+        
+        return realized
+
+    def get_unrealized_profit(self, current_prices):
+        """Calculate profit from open positions"""
+        unrealized = 0
+        
+        for symbol, shares in self.positions.items():
+            if shares > 0 and symbol in current_prices:
+                # Get all buy trades for this symbol
+                buy_trades = [t for t in self.trades 
+                            if t['symbol'] == symbol and t['action'] == 'BUY']
+                
+                if buy_trades:
+                    # Calculate average buy price
+                    total_cost = sum(t['price'] * t['shares'] for t in buy_trades)
+                    total_shares = sum(t['shares'] for t in buy_trades)
+                    
+                    if total_shares > 0:
+                        avg_buy_price = total_cost / total_shares
+                        current_price = current_prices[symbol]
+                        unrealized += (current_price - avg_buy_price) * shares
+        
+        return unrealized
+
+    def get_total_profit_accurate(self, current_prices=None):
+        """Get accurate total profit (realized + unrealized)"""
+        realized = self.get_realized_profit()
+        
+        if current_prices:
+            unrealized = self.get_unrealized_profit(current_prices)
+        else:
+            unrealized = 0
+        
+        return realized + unrealized

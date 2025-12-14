@@ -14,8 +14,15 @@ from strategy_base import StrategyBase
 import numpy as np
 
 class Strategy(StrategyBase):
-    def __init__(self, color="blue"):
-        super().__init__(name="500 Intersection", color=color)
+    def __init__(self, color="blue", initial_capital=100000, 
+                 position_size_pct=0.10, max_positions=10):
+        super().__init__(
+            name="500 Intersection", 
+            color=color,
+            initial_capital=initial_capital,
+            position_size_pct=position_size_pct,
+            max_positions=max_positions
+        )
         
     def reset(self):
         super().reset()

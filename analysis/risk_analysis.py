@@ -419,8 +419,8 @@ class RiskAnalyzer:
         # Calculate metrics
         win_rate = len(wins) / total_trades * 100
         
-        win_amounts = [w['profit'] for w in wins]
-        loss_amounts = [abs(l['loss']) for l in losses]
+        win_amounts = [w.get('profit_loss_dollars', 0) for w in wins if w.get('profit_loss_dollars', 0) > 0]
+        loss_amounts = [abs(l.get('profit_loss_dollars', 0)) for l in losses if l.get('profit_loss_dollars', 0) < 0]
         
         avg_win = np.mean(win_amounts) if win_amounts else 0
         avg_loss = np.mean(loss_amounts) if loss_amounts else 0

@@ -15,8 +15,15 @@ from strategy_base import StrategyBase
 import pandas as pd
 
 class Strategy(StrategyBase):
-    def __init__(self, color="red", buy_threshold=-0.05, sell_threshold=0.10):
-        super().__init__(name="Weekly Threshold", color=color)
+    def __init__(self, color="red", buy_threshold=-0.05, sell_threshold=0.10,
+                 initial_capital=100000, position_size_pct=0.05, max_positions=1000):
+        super().__init__(
+            name="Weekly Threshold", 
+            color=color,
+            initial_capital=initial_capital,
+            position_size_pct=position_size_pct,
+            max_positions=max_positions
+        )
         self.buy_threshold = buy_threshold      # -5% for buy
         self.sell_threshold = sell_threshold    # +10% for sell
         

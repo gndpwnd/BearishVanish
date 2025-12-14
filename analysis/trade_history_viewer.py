@@ -194,7 +194,7 @@ def show_trade_history_window(strategy, tracker, sim_id=None):
             else:
                 amount = 0
             
-            # Get P&L
+            # Get P&L - handle None values properly
             if 'profit_loss_dollars' in row:
                 pnl = row['profit_loss_dollars']
                 pnl_pct = row['profit_loss_pct']
@@ -203,6 +203,12 @@ def show_trade_history_window(strategy, tracker, sim_id=None):
                 pnl_pct = row['pnl_pct']
             else:
                 pnl = 0
+                pnl_pct = 0
+            
+            # CRITICAL FIX: Convert None to 0
+            if pnl is None:
+                pnl = 0
+            if pnl_pct is None:
                 pnl_pct = 0
             
             values = (
@@ -224,6 +230,7 @@ def show_trade_history_window(strategy, tracker, sim_id=None):
                 else:
                     tags.append('sell')
             
+            # Add profit/loss tags (safe now since pnl is never None)
             if pnl > 0:
                 tags.append('profit')
             elif pnl < 0:
@@ -246,7 +253,7 @@ def show_trade_history_window(strategy, tracker, sim_id=None):
         tk.Label(stats_frame, 
                 text=f"Showing: {total} trades | Buys: {buys} | Sells: {sells}", 
                 bg='#e0e0e0', font=('Arial', 9, 'bold')).pack(padx=10, pady=3)
-    
+
     # Bind filter changes
     action_combo.bind('<<ComboboxSelected>>', lambda e: populate_table())
     symbol_combo.bind('<<ComboboxSelected>>', lambda e: populate_table())

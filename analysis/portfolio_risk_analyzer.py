@@ -267,13 +267,30 @@ def analyze_portfolio_risk(strategy_trackers, spy_tracker=None, weights=None):
     Convenience function to analyze portfolio risk
     
     Args:
-        strategy_trackers: Dict of {strategy_name: tracker}
+        strategy_trackers: Dict of {strategy_name: tracker} OR a single StrategyTracker
         spy_tracker: Benchmark tracker (optional)
         weights: Strategy weights (default: equal weight)
     
     Returns:
         PortfolioRiskAnalyzer instance
     """
+    # Handle single tracker input
+    if isinstance(strategy_trackers, StrategyTracker):
+        strategy_trackers = {strategy_trackers.name: strategy_trackers}
+    
+    # Handle list of trackers
+    elif isinstance(strategy_trackers, list):
+        trackers_dict = {}
+        for tracker in strategy_trackers:
+            if isinstance(tracker, StrategyTracker):
+                trackers_dict[tracker.name] = tracker
+        strategy_trackers = trackers_dict
+    
+    # If no trackers or empty dict, return None
+    if not strategy_trackers:
+        print("⚠️  No strategy trackers provided for analysis")
+        return None
+    
     analyzer = PortfolioRiskAnalyzer(strategy_trackers, spy_tracker, weights)
     analyzer.print_portfolio_report()
     return analyzer
