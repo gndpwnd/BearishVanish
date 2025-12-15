@@ -1,10 +1,12 @@
 """
 Enhanced Simulation Telemetry with Complete Trade Recording AND BATCH OPTIMIZATION
+WITH UTF-8 SAFETY FOR ALL DATABASE WRITES
 FIXES: Missing timestamps, rejected trades, trade attempts, and context data
 USES SIMULATION TIMESTAMPS to prevent look-ahead bias
 ADDED: Batch insert methods for 5-10x speedup
 ADDED: Volume tracking for all trades
 FIXED: Indentation errors in record methods
+ADDED: UTF-8 encoding safety for all database operations
 """
 
 import sqlite3
@@ -18,9 +20,109 @@ import time
 
 TELEMETRY_ROOT = Path('./simulations')
 
+# ============================================================
+# UTF-8 SAFETY HELPERS
+# ============================================================
+
+def ensure_utf8(text):
+    """
+    Ensure a string is valid UTF-8
+    
+    Args:
+        text: Input string (can be str, bytes, or None)
+    
+    Returns:
+        UTF-8 encoded string or None
+    """
+    if text is None:
+        return None
+    
+    if isinstance(text, bytes):
+        # Try to decode bytes
+        try:
+            return text.decode('utf-8', errors='replace')
+        except:
+            return text.decode('latin-1', errors='replace')
+    
+    if not isinstance(text, str):
+        text = str(text)
+    
+    # Ensure string is valid UTF-8 by encoding and decoding
+    try:
+        # This will catch any encoding issues
+        text.encode('utf-8')
+        return text
+    except UnicodeEncodeError:
+        # Replace problematic characters
+        return text.encode('utf-8', errors='replace').decode('utf-8')
+
+def sanitize_json(data):
+    """
+    Sanitize data before JSON serialization to ensure UTF-8 compatibility
+    
+    Args:
+        data: Dictionary or object to serialize
+    
+    Returns:
+        JSON string with UTF-8 safe encoding
+    """
+    if data is None:
+        return None
+    
+    try:
+        # First attempt: normal serialization
+        return json.dumps(data, ensure_ascii=False)
+    except (TypeError, ValueError, UnicodeDecodeError):
+        # Second attempt: sanitize the data
+        if isinstance(data, dict):
+            sanitized = {
+                ensure_utf8(k): sanitize_value(v) 
+                for k, v in data.items()
+            }
+        else:
+            sanitized = sanitize_value(data)
+        
+        try:
+            return json.dumps(sanitized, ensure_ascii=False)
+        except:
+            # Final fallback: ASCII-only encoding
+            return json.dumps(sanitized, ensure_ascii=True)
+
+def sanitize_value(value):
+    """Recursively sanitize values for JSON"""
+    if value is None:
+        return None
+    elif isinstance(value, (str, bytes)):
+        return ensure_utf8(value)
+    elif isinstance(value, dict):
+        return {ensure_utf8(k): sanitize_value(v) for k, v in value.items()}
+    elif isinstance(value, (list, tuple)):
+        return [sanitize_value(v) for v in value]
+    elif isinstance(value, (int, float, bool)):
+        return value
+    else:
+        return ensure_utf8(str(value))
+
+def get_utf8_connection(db_path):
+    """
+    Create SQLite connection with UTF-8 encoding
+    
+    Args:
+        db_path: Path to database file
+    
+    Returns:
+        sqlite3.Connection with UTF-8 settings
+    """
+    conn = sqlite3.connect(db_path)
+    conn.text_factory = str  # Ensure strings are returned as str
+    # Set UTF-8 encoding
+    conn.execute("PRAGMA encoding = 'UTF-8'")
+    return conn
+
+
 class SimulationTelemetry:
     """
-    Enhanced telemetry system with complete trade recording
+    Enhanced telemetry system with complete trade recording and UTF-8 safety
     All timestamps use simulation time (not real-world time) to prevent look-ahead bias
     """
     
@@ -44,9 +146,12 @@ class SimulationTelemetry:
         self._init_database()
     
     def _init_database(self):
-        """Create enhanced database schema with volume tracking"""
-        conn = sqlite3.connect(self.db_path)
+        """Create enhanced database schema with volume tracking and UTF-8 encoding"""
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
+        
+        # Set UTF-8 encoding explicitly
+        cursor.execute("PRAGMA encoding = 'UTF-8'")
         
         # Table 1: Simulation metadata
         cursor.execute('''
@@ -221,7 +326,7 @@ class SimulationTelemetry:
             )
         ''')
         
-        # Table 9: NEW - Indicator history for debugging
+        # Table 9: Indicator history for debugging
         cursor.execute('''
             CREATE TABLE indicator_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -251,9 +356,14 @@ class SimulationTelemetry:
 
     def record_simulation_start(self, universe_name, symbols, start_date, end_date, 
                                initial_capital, config=None):
-        """Record simulation metadata"""
-        conn = sqlite3.connect(self.db_path)
+        """Record simulation metadata with UTF-8 safety"""
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
+        
+        # Sanitize all string inputs
+        universe_name = ensure_utf8(universe_name)
+        sanitized_symbols = [ensure_utf8(s) for s in symbols]
+        config_json = sanitize_json(config or {})
         
         cursor.execute('''
             INSERT INTO simulation_info 
@@ -261,14 +371,14 @@ class SimulationTelemetry:
              date_range_start, date_range_end, initial_capital, config_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            self.simulation_id,
+            ensure_utf8(self.simulation_id),
             int(datetime.now().timestamp()),
             universe_name,
-            len(symbols),
-            str(start_date),
-            str(end_date),
+            len(sanitized_symbols),
+            ensure_utf8(str(start_date)),
+            ensure_utf8(str(end_date)),
             initial_capital,
-            json.dumps(config or {})
+            config_json
         ))
         
         conn.commit()
@@ -297,13 +407,19 @@ class SimulationTelemetry:
                             portfolio_value, cash, num_positions, max_positions,
                             success, rejection_reason=None, volume=0, avg_volume_20d=0, relative_volume=1.0):
         """
-        Record EVERY trade attempt, including rejections WITH VOLUME
+        Record EVERY trade attempt, including rejections WITH VOLUME and UTF-8 safety
         Uses SIMULATION TIME, not real-world time
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         timestamp = self._get_simulation_timestamp(date)
+        
+        # Sanitize all string inputs
+        strategy_name = ensure_utf8(strategy_name)
+        symbol = ensure_utf8(symbol)
+        signal = ensure_utf8(signal)
+        rejection_reason = ensure_utf8(rejection_reason) if rejection_reason else None
         
         cursor.execute('''
             INSERT INTO trade_attempts
@@ -314,7 +430,7 @@ class SimulationTelemetry:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             timestamp,
-            str(date),
+            ensure_utf8(str(date)),
             strategy_name,
             symbol,
             signal,
@@ -337,13 +453,18 @@ class SimulationTelemetry:
                           portfolio_value=None, cash=None, num_positions=None,
                           entry_reason=None, volume=0, avg_volume_20d=0, relative_volume=1.0):
         """
-        Record BUY trade with volume data
+        Record BUY trade with volume data and UTF-8 safety
         Uses SIMULATION TIME, not real-world time
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         timestamp = self._get_simulation_timestamp(date)
+        
+        # Sanitize all string inputs
+        strategy_name = ensure_utf8(strategy_name)
+        symbol = ensure_utf8(symbol)
+        entry_reason = ensure_utf8(entry_reason) if entry_reason else None
         
         cursor.execute('''
             INSERT INTO trade_history
@@ -353,7 +474,7 @@ class SimulationTelemetry:
              trade_status, entry_reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
         ''', (
-            strategy_name, symbol, timestamp, str(date), price, shares,
+            strategy_name, symbol, timestamp, ensure_utf8(str(date)), price, shares,
             volume, avg_volume_20d, relative_volume,
             portfolio_value, cash, num_positions, entry_reason
         ))
@@ -365,13 +486,18 @@ class SimulationTelemetry:
                          portfolio_value=None, cash=None, forced=False, reason=None,
                          volume=0, avg_volume_20d=0, relative_volume=1.0):
         """
-        Record SELL trade with volume data
+        Record SELL trade with volume data and UTF-8 safety
         Uses SIMULATION TIME, not real-world time
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         exit_timestamp = self._get_simulation_timestamp(exit_date)
+        
+        # Sanitize all string inputs
+        strategy_name = ensure_utf8(strategy_name)
+        symbol = ensure_utf8(symbol)
+        reason = ensure_utf8(reason) if reason else None
         
         # Find most recent OPEN trade
         cursor.execute('''
@@ -407,7 +533,7 @@ class SimulationTelemetry:
                 forced_exit = ?, exit_reason = ?
             WHERE id = ?
         ''', (
-            exit_timestamp, str(exit_date), exit_price,
+            exit_timestamp, ensure_utf8(str(exit_date)), exit_price,
             volume, avg_volume_20d, relative_volume,
             portfolio_value, cash,
             profit_loss, profit_loss_pct,
@@ -420,18 +546,21 @@ class SimulationTelemetry:
 
     def record_daily_snapshot(self, strategy_name, date, portfolio_value,
                              cash, positions_value, num_positions, daily_return=None):
-        """Record daily portfolio state with SIMULATION timestamp"""
-        conn = sqlite3.connect(self.db_path)
+        """Record daily portfolio state with SIMULATION timestamp and UTF-8 safety"""
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         timestamp = self._get_simulation_timestamp(date)
+        
+        # Sanitize string inputs
+        strategy_name = ensure_utf8(strategy_name)
         
         cursor.execute('''
             INSERT INTO portfolio_history
             (timestamp, strategy_name, date, portfolio_value, cash, positions_value,
              num_positions, daily_return_pct)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (timestamp, strategy_name, str(date), portfolio_value, cash, positions_value,
+        ''', (timestamp, strategy_name, ensure_utf8(str(date)), portfolio_value, cash, positions_value,
               num_positions, daily_return))
         
         conn.commit()
@@ -439,35 +568,46 @@ class SimulationTelemetry:
 
     def log_execution(self, strategy_name, symbol, date, bar_number, action, details=None):
         """
-        Log bar-by-bar execution for debugging
+        Log bar-by-bar execution for debugging with UTF-8 safety
         Uses SIMULATION TIME, not real-world time
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         timestamp = self._get_simulation_timestamp(date)
+        
+        # Sanitize strings
+        strategy_name = ensure_utf8(strategy_name)
+        symbol = ensure_utf8(symbol)
+        action = ensure_utf8(action)
+        
+        # Sanitize details JSON
+        details_json = sanitize_json(details) if details else None
         
         cursor.execute('''
             INSERT INTO execution_log
             (timestamp, date, bar_number, strategy_name, symbol, action, details)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (timestamp, str(date), bar_number, strategy_name, symbol, action,
-              json.dumps(details) if details else None))
+        ''', (timestamp, ensure_utf8(str(date)), bar_number, strategy_name, symbol, action,
+              details_json))
         
         conn.commit()
         conn.close()
 
     def finalize_strategy(self, strategy_name, tracker=None, spy_returns=None, rejected_count=0):
-        """Calculate and store final metrics - DATABASE ONLY VERSION with DEBUGGING"""
+        """Calculate and store final metrics - DATABASE ONLY VERSION with UTF-8 safety"""
         import numpy as np
         import json
         import sqlite3
         import time
         
+        # Sanitize strategy name
+        strategy_name = ensure_utf8(strategy_name)
+        
         print(f"  📊 Finalizing {strategy_name}...")
         print(f"    Using database: {self.db_path}")
         
-        conn = sqlite3.connect(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         # ========================================================
@@ -657,7 +797,7 @@ class SimulationTelemetry:
         exposure_time_pct = exposure_result[0] if exposure_result else 0
         
         # ========================================================
-        # 6. INSERT PERFORMANCE RECORD (FIXED!)
+        # 6. INSERT PERFORMANCE RECORD WITH UTF-8 SAFETY
         # ========================================================
         try:
             cursor.execute('''
@@ -672,12 +812,12 @@ class SimulationTelemetry:
                 position_size_pct, max_positions, strategy_config_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                strategy_name,
+                ensure_utf8(strategy_name),
                 initial_capital,
                 final_value,
                 total_return_pct,
                 total_profit_dollars,
-                total_trades,  # ✅ Now will be correct!
+                total_trades,
                 completed_trades,
                 open_positions,
                 rejected_count,
@@ -700,7 +840,7 @@ class SimulationTelemetry:
                 None,  # information_ratio
                 position_size_pct,
                 max_positions,
-                strategy_config_json
+                sanitize_json(strategy_config_json)
             ))
             
             conn.commit()
@@ -726,21 +866,21 @@ class SimulationTelemetry:
 
     def record_simulation_end(self):
         """Mark simulation as complete"""
-        conn = sqlite3.connect(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
             UPDATE simulation_info 
             SET end_time = ?
             WHERE simulation_id = ?
-        ''', (int(datetime.now().timestamp()), self.simulation_id))
+        ''', (int(datetime.now().timestamp()), ensure_utf8(self.simulation_id)))
         
         conn.commit()
         conn.close()
     
     def print_summary(self):
         """Print simulation summary"""
-        conn = sqlite3.connect(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         
         # Get simulation info
         info = pd.read_sql_query('SELECT * FROM simulation_info', conn).iloc[0]
@@ -773,22 +913,44 @@ class SimulationTelemetry:
         conn.close()
 
     # ============================================================
-    # 🚀 NEW: BATCH INSERT METHODS (5-10x Speedup)
+    # 🚀 BATCH INSERT METHODS WITH UTF-8 SAFETY
     # ============================================================
     
     def batch_insert_trade_attempts(self, attempts_list):
-        """
-        Batch insert trade attempts with volume
-        5-10x faster than individual inserts
-        
-        Args:
-            attempts_list: List of tuples matching trade_attempts schema
-            Each tuple should have 15 values
-        """
+        """Batch insert trade attempts with UTF-8 safety"""
         if not attempts_list:
             return
         
-        conn = sqlite3.connect(self.db_path)
+        # Sanitize all string fields in each tuple
+        sanitized_attempts = []
+        for attempt in attempts_list:
+            # Unpack tuple (15 elements)
+            (timestamp, date_str, strategy_name, symbol, signal, price,
+             volume, avg_volume_20d, relative_volume,
+             portfolio_value, cash, num_positions, max_positions, 
+             success, rejection_reason) = attempt
+            
+            # Sanitize strings
+            sanitized = (
+                timestamp,
+                ensure_utf8(date_str),
+                ensure_utf8(strategy_name),
+                ensure_utf8(symbol),
+                ensure_utf8(signal),
+                price,
+                volume,
+                avg_volume_20d,
+                relative_volume,
+                portfolio_value,
+                cash,
+                num_positions,
+                max_positions,
+                success,
+                ensure_utf8(rejection_reason) if rejection_reason else None
+            )
+            sanitized_attempts.append(sanitized)
+        
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         cursor.executemany('''
@@ -798,23 +960,43 @@ class SimulationTelemetry:
              portfolio_value, cash, num_positions, max_positions, 
              success, rejection_reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', attempts_list)
+        ''', sanitized_attempts)
         
         conn.commit()
         conn.close()
 
     def batch_insert_trade_entries(self, entries_list):
-        """
-        Batch insert trade entries with volume
-        
-        Args:
-            entries_list: List of tuples matching trade_history schema
-            Each tuple should have 13 values (trade_status 'OPEN' is hardcoded in SQL)
-        """
+        """Batch insert trade entries with UTF-8 safety"""
         if not entries_list:
             return
         
-        conn = sqlite3.connect(self.db_path)
+        # Sanitize all string fields
+        sanitized_entries = []
+        for entry in entries_list:
+            # Unpack tuple (13 elements)
+            (strategy_name, symbol, timestamp, date_str, price, shares,
+             volume, avg_volume_20d, relative_volume,
+             portfolio_value, cash, num_positions, entry_reason) = entry
+            
+            # Sanitize strings
+            sanitized = (
+                ensure_utf8(strategy_name),
+                ensure_utf8(symbol),
+                timestamp,
+                ensure_utf8(date_str),
+                price,
+                shares,
+                volume,
+                avg_volume_20d,
+                relative_volume,
+                portfolio_value,
+                cash,
+                num_positions,
+                ensure_utf8(entry_reason) if entry_reason else None
+            )
+            sanitized_entries.append(sanitized)
+        
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         cursor.executemany('''
@@ -824,23 +1006,17 @@ class SimulationTelemetry:
             entry_portfolio_value, entry_cash, entry_num_positions, 
             trade_status, entry_reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
-        ''', entries_list)
+        ''', sanitized_entries)
         
         conn.commit()
         conn.close()
     
     def batch_update_trade_exits(self, exits_list):
-        """
-        Batch update trade exits with volume
-        Each tuple should have 16 values
-        
-        Args:
-            exits_list: List of tuples where each tuple contains 16 values
-        """
+        """Batch update trade exits with UTF-8 safety"""
         if not exits_list:
             return
         
-        conn = sqlite3.connect(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         for exit_tuple in exits_list:
@@ -867,6 +1043,11 @@ class SimulationTelemetry:
                 reason = exit_tuple[13]
                 strategy_name = exit_tuple[14]
                 symbol = exit_tuple[15]
+                
+                # Sanitize strings
+                strategy_name = ensure_utf8(strategy_name)
+                symbol = ensure_utf8(symbol)
+                reason = ensure_utf8(reason) if reason else None
                 
                 # Find most recent OPEN trade
                 cursor.execute('''
@@ -896,7 +1077,7 @@ class SimulationTelemetry:
                             forced_exit = ?, exit_reason = ?
                         WHERE id = ?
                     ''', (
-                        exit_timestamp, str(exit_date), exit_price,
+                        exit_timestamp, ensure_utf8(str(exit_date)), exit_price,
                         exit_volume, exit_avg_volume_20d, exit_relative_volume,
                         portfolio_value, cash,
                         profit_loss_calc, profit_loss_pct_calc,
@@ -913,17 +1094,29 @@ class SimulationTelemetry:
         conn.close()
 
     def batch_insert_portfolio_snapshots(self, snapshots_list):
-        """
-        Batch insert daily portfolio snapshots
-        Much faster than one-by-one
-        
-        Args:
-            snapshots_list: List of tuples matching portfolio_history schema
-        """
+        """Batch insert portfolio snapshots with UTF-8 safety"""
         if not snapshots_list:
             return
         
-        conn = sqlite3.connect(self.db_path)
+        # Sanitize string fields
+        sanitized_snapshots = []
+        for snapshot in snapshots_list:
+            (timestamp, strategy_name, date_str, portfolio_value, 
+             cash, positions_value, num_positions, daily_return) = snapshot
+            
+            sanitized = (
+                timestamp,
+                ensure_utf8(strategy_name),
+                ensure_utf8(date_str),
+                portfolio_value,
+                cash,
+                positions_value,
+                num_positions,
+                daily_return
+            )
+            sanitized_snapshots.append(sanitized)
+        
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         cursor.executemany('''
@@ -931,29 +1124,41 @@ class SimulationTelemetry:
             (timestamp, strategy_name, date, portfolio_value, cash, positions_value,
              num_positions, daily_return_pct)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', snapshots_list)
+        ''', sanitized_snapshots)
         
         conn.commit()
         conn.close()
 
     def batch_insert_execution_log(self, log_entries):
-        """
-        Batch insert execution log entries
-        
-        Args:
-            log_entries: List of tuples for execution_log table
-        """
+        """Batch insert execution log entries with UTF-8 safety"""
         if not log_entries:
             return
         
-        conn = sqlite3.connect(self.db_path)
+        # Sanitize string fields
+        sanitized_entries = []
+        for entry in log_entries:
+            (timestamp, date_str, bar_number, strategy_name, 
+             symbol, action, details) = entry
+            
+            sanitized = (
+                timestamp,
+                ensure_utf8(date_str),
+                bar_number,
+                ensure_utf8(strategy_name),
+                ensure_utf8(symbol),
+                ensure_utf8(action),
+                sanitize_json(details) if details else None
+            )
+            sanitized_entries.append(sanitized)
+        
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         cursor.executemany('''
             INSERT INTO execution_log
             (timestamp, date, bar_number, strategy_name, symbol, action, details)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', log_entries)
+        ''', sanitized_entries)
         
         conn.commit()
         conn.close()
@@ -993,7 +1198,7 @@ class BatchBuffer:
             self.flush_entries()
     
     def add_exit(self, *args):
-        """Add trade exit to buffer - FIXED VERSION"""
+        """Add trade exit to buffer"""
         # Check if we received a single tuple with 16 values
         if len(args) == 1 and isinstance(args[0], tuple) and len(args[0]) == 16:
             self.exits.append(args[0])

@@ -444,7 +444,7 @@ class AnalysisEngine:
         ))
     
     def _write_chart_cache(self, strategy_name, chart_data):
-        """Write to chart_cache table"""
+        """Write to chart_cache table with UTF-8 safety"""
         if not chart_data:
             return
         
@@ -455,6 +455,15 @@ class AnalysisEngine:
             # IMPORTANT: chart_id format must match what dashboard expects
             chart_id = f"{strategy_name}_{chart_type}"
             
+            try:
+                # Ensure JSON is UTF-8 encoded
+                chart_json = json.dumps(data, ensure_ascii=False)
+                # Double-check encoding
+                chart_json = chart_json.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+            except Exception as e:
+                print(f"Warning: Could not encode chart data for {chart_id}: {e}")
+                continue
+            
             cursor.execute('''
                 INSERT OR REPLACE INTO chart_cache
                 VALUES (?, ?, ?, ?, ?)
@@ -462,7 +471,7 @@ class AnalysisEngine:
                 chart_id,
                 strategy_name,
                 chart_type,
-                json.dumps(data),
+                chart_json,
                 timestamp
             ))
         
@@ -512,12 +521,17 @@ class AnalysisEngine:
         cursor = self.conn.cursor()
         
         for _, row in stock_perf.iterrows():
+            # Ensure symbol is UTF-8 safe
+            symbol = row['symbol']
+            if isinstance(symbol, bytes):
+                symbol = symbol.decode('utf-8', errors='ignore')
+            
             cursor.execute('''
                 INSERT OR REPLACE INTO stock_performance_cache
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 strategy_name,
-                row['symbol'],
+                symbol,
                 row['total_trades'],
                 row['winning_trades'],
                 row['losing_trades'],
@@ -530,14 +544,22 @@ class AnalysisEngine:
             ))
     
     def _store_metadata(self):
-        """Store analysis metadata"""
+        """Store analysis metadata with UTF-8 safety"""
         cursor = self.conn.cursor()
         timestamp = int(time.time())
         
+        # Ensure database name is UTF-8 safe
+        sim_db_name = str(self.sim_db_path.name)
+        try:
+            if isinstance(sim_db_name, bytes):
+                sim_db_name = sim_db_name.decode('utf-8', errors='ignore')
+        except Exception:
+            sim_db_name = "unknown_database.db"
+        
         metadata = [
-            ('simulation_db', str(self.sim_db_path.name), timestamp),
-            ('simulation_id', self.reader.get_simulation_id(), timestamp),
-            ('universe', self.reader.get_universe(), timestamp),
+            ('simulation_db', sim_db_name, timestamp),
+            ('simulation_id', str(self.reader.get_simulation_id()), timestamp),
+            ('universe', str(self.reader.get_universe()), timestamp),
             ('num_symbols', str(self.reader.get_num_symbols()), timestamp),
             ('analysis_timestamp', str(timestamp), timestamp),
             ('analysis_version', '1.0', timestamp),

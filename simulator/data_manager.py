@@ -1,9 +1,10 @@
 """
-OPTIMIZED Data Manager with FAST Batch Loading
+OPTIMIZED Data Manager with FAST Batch Loading - UTF-8 SAFE VERSION
 Key improvements:
 1. Batch loading - load all symbols in 1-2 queries instead of 500+
 2. Connection pooling - reuse connections instead of creating new ones
 3. Optimal worker count - 2-4 workers max for SQLite
+4. UTF-8 safety for all database operations
 """
 
 import os
@@ -23,6 +24,57 @@ import threading
 OFFLINE_DATA_DIR = Path('./offline_data')
 DB_PATH = OFFLINE_DATA_DIR / 'stock_data.db'
 PROGRESS_FILE = OFFLINE_DATA_DIR / 'download_progress.json'
+
+# ============================================================
+# UTF-8 SAFETY HELPERS
+# ============================================================
+
+def ensure_utf8_data(text):
+    """Ensure text is valid UTF-8"""
+    if text is None:
+        return None
+    
+    if isinstance(text, bytes):
+        try:
+            return text.decode('utf-8', errors='replace')
+        except:
+            return text.decode('latin-1', errors='replace')
+    
+    if not isinstance(text, str):
+        text = str(text)
+    
+    try:
+        text.encode('utf-8')
+        return text
+    except UnicodeEncodeError:
+        return text.encode('utf-8', errors='replace').decode('utf-8')
+
+def get_utf8_connection_data(db_path, timeout=30.0):
+    """Create SQLite connection with UTF-8 encoding"""
+    conn = sqlite3.connect(db_path, timeout=timeout)
+    conn.text_factory = str
+    conn.execute("PRAGMA encoding = 'UTF-8'")
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    conn.execute('PRAGMA cache_size=10000')
+    conn.execute('PRAGMA temp_store=MEMORY')
+    return conn
+
+def clean_symbol_utf8(symbol):
+    """Clean symbol and ensure UTF-8/ASCII compatibility"""
+    if not symbol:
+        return None
+    
+    # Ensure UTF-8
+    symbol = ensure_utf8_data(symbol)
+    
+    # Strip and uppercase
+    symbol = symbol.strip().upper()
+    
+    # Remove any non-ASCII characters (symbols should be ASCII)
+    symbol = ''.join(c for c in symbol if ord(c) < 128)
+    
+    return symbol if symbol else None
 
 class DataManager:
     def __init__(self, api_key, secret_key, offline_mode=False, quiet=True):
@@ -56,19 +108,14 @@ class DataManager:
         # Batch download settings - OPTIMIZED FOR SQLITE
         self.max_parallel_workers = 3  # Reduced from 4 - SQLite works best with 2-4
         self.download_progress = {}
-        
+    
     def _get_connection(self):
-        """Get a connection from the pool or create new one"""
+        """Get a connection from the pool or create new one with UTF-8 encoding"""
         with self._connection_lock:
             if self._connection_pool:
                 return self._connection_pool.pop()
             else:
-                conn = sqlite3.connect(self.db_path, timeout=30.0)
-                # Optimize for reads
-                conn.execute('PRAGMA journal_mode=WAL')  # Write-Ahead Logging
-                conn.execute('PRAGMA synchronous=NORMAL')
-                conn.execute('PRAGMA cache_size=10000')
-                conn.execute('PRAGMA temp_store=MEMORY')
+                conn = get_utf8_connection_data(self.db_path)
                 return conn
     
     def _return_connection(self, conn):
@@ -80,12 +127,8 @@ class DataManager:
                 conn.close()
     
     def _init_database(self):
-        """Initialize SQLite database with optimized schema"""
-        conn = sqlite3.connect(self.db_path)
-        
-        # Enable WAL mode for better concurrency
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA synchronous=NORMAL')
+        """Initialize SQLite database with UTF-8 encoding"""
+        conn = get_utf8_connection_data(self.db_path)
         
         cursor = conn.cursor()
         
@@ -128,15 +171,22 @@ class DataManager:
         conn.close()
     
     # ============================================================
-    # 🚀 NEW: FAST BATCH LOADING
+    # 🚀 FAST BATCH LOADING - UTF-8 SAFE
     # ============================================================
     
     def load_multiple_symbols_batch(self, symbols, start_date=None, end_date=None):
         """
-        🚀 FAST: Load multiple symbols in a single query
+        🚀 FAST: Load multiple symbols in a single query with UTF-8 safety
         This is 10-50x faster than loading symbols individually
         """
         if not symbols:
+            return {}
+        
+        # Clean all symbols
+        symbols_clean = [clean_symbol_utf8(s) for s in symbols]
+        symbols_clean = [s for s in symbols_clean if s]  # Remove None values
+        
+        if not symbols_clean:
             return {}
         
         conn = self._get_connection()
@@ -144,10 +194,10 @@ class DataManager:
         try:
             # Build query with date filtering if provided
             query = 'SELECT symbol, timestamp, open, high, low, close, volume, trade_count, vwap FROM stock_bars WHERE symbol IN ('
-            query += ','.join('?' * len(symbols))
+            query += ','.join('?' * len(symbols_clean))
             query += ')'
             
-            params = symbols.copy()
+            params = symbols_clean.copy()
             
             if start_date and end_date:
                 start_ts = int(start_date.timestamp())
@@ -172,12 +222,12 @@ class DataManager:
             result = {}
             
             # Add progress bar for symbol processing
-            if not self.quiet and len(symbols) > 10:
+            if not self.quiet and len(symbols_clean) > 10:
                 from tqdm import tqdm
-                symbol_iterator = tqdm(symbols, desc="Processing symbols", unit="sym", 
+                symbol_iterator = tqdm(symbols_clean, desc="Processing symbols", unit="sym", 
                                     bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}')
             else:
-                symbol_iterator = symbols
+                symbol_iterator = symbols_clean
             
             for symbol in symbol_iterator:
                 df_symbol = df_all[df_all['symbol'] == symbol].copy()
@@ -192,14 +242,19 @@ class DataManager:
             print(f"❌ Batch load error: {e}")
             self._return_connection(conn)
             return {}
-
+    
     def load_offline_data(self, symbol, start_date=None, end_date=None):
-        """Load cached data for a single symbol (uses connection pool)"""
+        """Load cached data for a single symbol with UTF-8 safety"""
         try:
+            # Clean symbol
+            symbol = clean_symbol_utf8(symbol)
+            if not symbol:
+                return None
+            
             conn = self._get_connection()
             
             query = 'SELECT timestamp, open, high, low, close, volume, trade_count, vwap FROM stock_bars WHERE symbol = ?'
-            params = [symbol.upper()]
+            params = [symbol]
             
             if start_date and end_date:
                 start_ts = int(start_date.timestamp())
@@ -226,11 +281,15 @@ class DataManager:
             if 'conn' in locals():
                 self._return_connection(conn)
             return None
-
+    
     def save_offline_data(self, symbol, df):
-        """Save data to SQLite database (uses connection pool)"""
+        """Save data to SQLite database with UTF-8 safety"""
         try:
-            symbol = symbol.upper()
+            # Clean symbol
+            symbol = clean_symbol_utf8(symbol)
+            if not symbol:
+                return False
+            
             conn = self._get_connection()
             
             df_to_save = df.copy()
@@ -267,13 +326,13 @@ class DataManager:
                         (symbol, timestamp, open, high, low, close, volume, trade_count, vwap)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
-                        symbol.upper(),
+                        symbol,
                         timestamp,
-                        row['open'],
-                        row['high'],
-                        row['low'],
-                        row['close'],
-                        row['volume'],
+                        float(row['open']),
+                        float(row['high']),
+                        float(row['low']),
+                        float(row['close']),
+                        int(row['volume']),
                         row.get('trade_count'),
                         row.get('vwap')
                     ))
@@ -296,7 +355,12 @@ class DataManager:
             return False
     
     def _update_metadata(self, symbol, conn):
-        """Update metadata for a symbol"""
+        """Update metadata for a symbol with UTF-8 safety"""
+        # Ensure symbol is clean
+        symbol = clean_symbol_utf8(symbol)
+        if not symbol:
+            return
+        
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -314,14 +378,14 @@ class DataManager:
             ''', (symbol, row[0], row[1], row[2], int(datetime.now().timestamp())))
     
     # ============================================================
-    # Keep all other methods from original (API fetching, etc.)
+    # API FETCHING METHODS
     # ============================================================
     
     def _is_rate_limit_error(self, error_msg):
         """Check if error is a rate limit error"""
         error_str = str(error_msg).lower()
         return 'too many requests' in error_str or 'rate limit' in error_str or '429' in error_str
-
+    
     def _activate_trickle_mode(self):
         """Activate trickle mode when rate limited"""
         if not self.trickle_mode:
@@ -330,13 +394,16 @@ class DataManager:
             print(f"   Cooling down for {self.rate_limit_cooldown}s first...")
             time.sleep(self.rate_limit_cooldown)
             self.trickle_mode = True
-
+    
     def fetch_from_api(self, symbol, start_date, end_date, retry_count=None):
-        """Fetch data from Alpaca API with rate limit detection"""
+        """Fetch data from Alpaca API with rate limit detection and UTF-8 safety"""
         if retry_count is None:
             retry_count = self.retry_count
         
-        symbol = symbol.upper()
+        # Clean symbol
+        symbol = clean_symbol_utf8(symbol)
+        if not symbol:
+            return None
         
         if isinstance(start_date, pd.Timestamp) and start_date.tz is not None:
             start_date = start_date.tz_localize(None)
@@ -403,7 +470,7 @@ class DataManager:
                     print(f"❌ API error for {symbol} (attempt {attempt + 1}/{retry_count}): {error_msg}")
                     self.api_errors.append({
                         'symbol': symbol,
-                        'error': error_msg,
+                        'error': ensure_utf8_data(error_msg),
                         'timestamp': datetime.now()
                     })
                     self.failed_symbols.add(symbol)
@@ -412,8 +479,13 @@ class DataManager:
         return None
     
     def get_data_range(self, symbol):
-        """Get the date range of cached data for a symbol"""
+        """Get the date range of cached data for a symbol with UTF-8 safety"""
         try:
+            # Clean symbol
+            symbol = clean_symbol_utf8(symbol)
+            if not symbol:
+                return None
+            
             conn = self._get_connection()
             cursor = conn.cursor()
             
@@ -421,7 +493,7 @@ class DataManager:
                 SELECT earliest_timestamp, latest_timestamp, bar_count
                 FROM symbol_metadata
                 WHERE symbol = ?
-            ''', (symbol.upper(),))
+            ''', (symbol,))
             
             row = cursor.fetchone()
             self._return_connection(conn)
@@ -438,7 +510,12 @@ class DataManager:
             return None
     
     def find_gaps(self, symbol, start_date, end_date):
-        """Identify gaps in the data"""
+        """Identify gaps in the data with UTF-8 safety"""
+        # Clean symbol
+        symbol = clean_symbol_utf8(symbol)
+        if not symbol:
+            return []
+        
         if isinstance(start_date, pd.Timestamp) and start_date.tz is not None:
             start_date = start_date.tz_localize(None)
         if isinstance(end_date, pd.Timestamp) and end_date.tz is not None:
@@ -466,9 +543,14 @@ class DataManager:
         return gaps
     
     def get_stock_data(self, symbol, days=180):
-        """Main method to get stock data"""
+        """Main method to get stock data with UTF-8 safety"""
         try:
-            symbol = symbol.upper()
+            # Clean symbol
+            symbol = clean_symbol_utf8(symbol)
+            if not symbol:
+                print(f"❌ Invalid symbol provided")
+                return None
+            
             end_date = datetime.now().replace(tzinfo=None)
             start_date = (end_date - timedelta(days=days)).replace(tzinfo=None)
             
@@ -511,7 +593,7 @@ class DataManager:
             return None
     
     def list_cached_symbols(self):
-        """List all symbols with cached data"""
+        """List all symbols with cached data with UTF-8 safety"""
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -524,10 +606,12 @@ class DataManager:
             
             cached = []
             for row in cursor.fetchall():
+                # Ensure symbol is UTF-8 clean
+                symbol = ensure_utf8_data(row[0])
                 start_date = datetime.fromtimestamp(row[1]).date()
                 end_date = datetime.fromtimestamp(row[2]).date()
                 cached.append({
-                    'symbol': row[0],
+                    'symbol': symbol,
                     'bars': row[3],
                     'date_range': f"{start_date} to {end_date}"
                 })
@@ -539,14 +623,14 @@ class DataManager:
             return []
     
     def print_cache_status(self):
-        """Print status of offline cache"""
+        """Print status of offline cache with UTF-8 safety"""
         try:
             cached = self.list_cached_symbols()
             
             db_size_mb = self.db_path.stat().st_size / (1024 * 1024) if self.db_path.exists() else 0
             
             print(f"\n{'='*60}")
-            print(f"OFFLINE CACHE STATUS (SQLite)")
+            print(f"OFFLINE CACHE STATUS (SQLite) - UTF-8 SAFE")
             print(f"{'='*60}")
             print(f"Location: {self.db_path.absolute()}")
             print(f"Database size: {db_size_mb:.2f} MB")
@@ -557,7 +641,8 @@ class DataManager:
                 print(f"{'Symbol':<10} {'Bars':<10} {'Date Range'}")
                 print(f"{'-'*60}")
                 for item in cached[:20]:
-                    print(f"{item['symbol']:<10} {item['bars']:<10} {item['date_range']}")
+                    symbol = ensure_utf8_data(item['symbol'])
+                    print(f"{symbol:<10} {item['bars']:<10} {item['date_range']}")
                 
                 if len(cached) > 20:
                     print(f"... and {len(cached) - 20} more")
@@ -569,10 +654,10 @@ class DataManager:
             print(f"❌ Error printing cache status: {e}")
     
     def vacuum_database(self):
-        """Optimize database"""
+        """Optimize database with UTF-8 safety"""
         try:
             print("Optimizing database...")
-            conn = sqlite3.connect(self.db_path)
+            conn = get_utf8_connection_data(self.db_path)
             conn.execute('VACUUM')
             conn.execute('ANALYZE')
             conn.close()

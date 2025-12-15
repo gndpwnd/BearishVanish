@@ -35,6 +35,8 @@ class SimulationReader:
             raise FileNotFoundError(f"Simulation database not found: {db_path}")
         
         self.conn = sqlite3.connect(str(self.db_path))
+        # Set text factory to handle non-UTF8 data by replacing invalid characters
+        self.conn.text_factory = lambda x: str(x, 'utf-8', 'replace')
         self.conn.row_factory = sqlite3.Row
         
         # Cache metadata

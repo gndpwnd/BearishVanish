@@ -56,8 +56,13 @@ class ChartProcessor:
     
     def _process_equity_curve(self):
         """Pre-compute equity curve data"""
+        try:
+            dates = self.portfolio['date'].dt.strftime('%Y-%m-%d').tolist()
+        except Exception:
+            dates = []
+        
         return {
-            'dates': self.portfolio['date'].dt.strftime('%Y-%m-%d').tolist(),
+            'dates': dates,
             'values': self.portfolio['portfolio_value'].tolist(),
             'initial_cash': self.reader.get_initial_cash(),
             'num_positions': self.portfolio['num_positions'].tolist() if 'num_positions' in self.portfolio else [],
@@ -69,8 +74,13 @@ class ChartProcessor:
         running_max = np.maximum.accumulate(values)
         drawdowns = (values - running_max) / running_max * 100
         
+        try:
+            dates = self.portfolio['date'].dt.strftime('%Y-%m-%d').tolist()
+        except Exception:
+            dates = []
+        
         return {
-            'dates': self.portfolio['date'].dt.strftime('%Y-%m-%d').tolist(),
+            'dates': dates,
             'drawdowns': drawdowns.tolist(),
         }
     
@@ -165,8 +175,12 @@ class ChartProcessor:
         pnl = self.closed_trades['profit_loss_dollars'].values
         cumulative = np.cumsum(pnl)
         
-        # Get dates
-        dates = self.closed_trades['exit_date'].dt.strftime('%Y-%m-%d').tolist()
+        # Get dates safely
+        dates = []
+        try:
+            dates = self.closed_trades['exit_date'].dt.strftime('%Y-%m-%d').tolist()
+        except Exception:
+            dates = []
         
         return {
             'dates': dates,
