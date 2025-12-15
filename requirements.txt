@@ -28,3 +28,18 @@ numba
 line-profiler
 memory-profiler
 networkx
+
+
+
+# FastAPI Trading Dashboard - Backend Dependencies
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-multipart==0.0.6
+python-jose[cryptography]==3.3.0
+python-dateutil
+pytest==7.4.3
+pytest-asyncio==0.23.3
+httpx==0.26.0
+orjson==3.9.10  # Fast JSON serialization
