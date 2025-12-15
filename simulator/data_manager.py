@@ -135,14 +135,6 @@ class DataManager:
         """
         🚀 FAST: Load multiple symbols in a single query
         This is 10-50x faster than loading symbols individually
-        
-        Args:
-            symbols: List of symbols to load
-            start_date: Start date (optional)
-            end_date: End date (optional)
-            
-        Returns:
-            Dict of {symbol: DataFrame}
         """
         if not symbols:
             return {}
@@ -178,7 +170,16 @@ class DataManager:
             
             # Split by symbol
             result = {}
-            for symbol in symbols:
+            
+            # Add progress bar for symbol processing
+            if not self.quiet and len(symbols) > 10:
+                from tqdm import tqdm
+                symbol_iterator = tqdm(symbols, desc="Processing symbols", unit="sym", 
+                                    bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}')
+            else:
+                symbol_iterator = symbols
+            
+            for symbol in symbol_iterator:
                 df_symbol = df_all[df_all['symbol'] == symbol].copy()
                 if not df_symbol.empty:
                     df_symbol.set_index('timestamp', inplace=True)
@@ -191,7 +192,7 @@ class DataManager:
             print(f"❌ Batch load error: {e}")
             self._return_connection(conn)
             return {}
-    
+
     def load_offline_data(self, symbol, start_date=None, end_date=None):
         """Load cached data for a single symbol (uses connection pool)"""
         try:

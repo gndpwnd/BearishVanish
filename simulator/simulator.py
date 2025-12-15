@@ -36,26 +36,19 @@ def precompute_indicators_for_symbol(symbol: str,
     """
     Pre-compute all indicators for a symbol ONCE
     This is the key optimization - calculate before simulation loop
+    COMPLETELY SILENT - no print statements
     """
     if not required_indicators:
         return data
     
-    # SILENT MODE - remove print statements for parallel processing
-    # print(f"  Pre-computing {len(required_indicators)} indicators for {symbol}...")
-    start_time = time.time()
-    
-    # Use the optimized function from indicator_base
+    # COMPLETELY SILENT - no timing or print statements
     try:
         from indicator_base import precompute_all_indicators
         enriched_data = precompute_all_indicators(data, required_indicators, use_numba=True)
-    except ImportError as e:
+        return enriched_data
+    except ImportError:
         # Silent fallback
-        enriched_data = data
-    
-    # elapsed = (time.time() - start_time) * 1000
-    # print(f"  ✅ {symbol} indicators computed in {elapsed:.1f}ms")
-    
-    return enriched_data
+        return data
 
 # ============================================================
 # STRATEGY LOADER (FIXED for multiprocessing)
@@ -479,12 +472,23 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     end_date = pd.Timestamp.now()
     start_date = end_date - pd.Timedelta(days=180)
     
-    # Load symbols in batch
-    data_dict = data_manager.load_multiple_symbols_batch(
-        symbols, start_date, end_date
-    )
+    # Load symbols in batch with progress bar
+    from tqdm import tqdm
     
-    # Load SPY data
+    # Use a progress bar for data loading
+    with tqdm(total=len(symbols), desc="Loading data", unit="stock", 
+              bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}',
+              ncols=80) as pbar:
+        
+        # Load all symbols in batch
+        data_dict = data_manager.load_multiple_symbols_batch(
+            symbols, start_date, end_date
+        )
+        
+        # Update progress bar to show completion
+        pbar.update(len(symbols))
+    
+    # Load SPY data separately (no progress bar for single symbol)
     spy_data = data_manager.get_stock_data('SPY', days=180)
     
     # Filter out None data

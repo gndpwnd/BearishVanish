@@ -23,6 +23,9 @@ class StrategyConfig:
     max_positions: int = 10
     color: str = "#1f77b4"
     
+    # Verbosity control
+    verbose: bool = True  # <--- ADD THIS LINE
+    
     # Optimization settings
     use_numba: bool = True
     precompute_indicators: bool = True
@@ -37,6 +40,26 @@ class StrategyConfig:
     allow_partial_sells: bool = True
     allow_shorting: bool = False
     max_leverage: float = 1.0
+
+    def to_dict(self):
+        """Convert to dictionary for serialization"""
+        return {
+            'name': self.name,
+            'initial_capital': self.initial_capital,
+            'position_size_pct': self.position_size_pct,
+            'max_positions': self.max_positions,
+            'color': self.color,
+            'verbose': self.verbose,
+            'use_numba': self.use_numba,
+            'precompute_indicators': self.precompute_indicators,
+            'cache_signals': self.cache_signals,
+            'stop_loss_pct': self.stop_loss_pct,
+            'take_profit_pct': self.take_profit_pct,
+            'trailing_stop_pct': self.trailing_stop_pct,
+            'allow_partial_sells': self.allow_partial_sells,
+            'allow_shorting': self.allow_shorting,
+            'max_leverage': self.max_leverage
+        }
 
 @dataclass
 class StrategyPerformance:
@@ -90,9 +113,11 @@ class StrategyBase:
         # Strategy state
         self.required_indicators = self._get_required_indicators()
         
-        print(f"✅ Strategy initialized: {self.name}")
-        print(f"   Required indicators: {len(self.required_indicators)}")
-    
+        # Only print if verbose is True
+        if self.config.verbose:  # <--- ADD THIS CHECK
+            print(f"✅ Strategy initialized: {self.name}")
+            print(f"   Required indicators: {len(self.required_indicators)}")
+
     def _get_required_indicators(self) -> List[str]:
         """
         Get list of indicators required by this strategy
@@ -356,6 +381,7 @@ class StrategyBase:
             'initial_capital': self.initial_capital,
             'position_size_pct': self.position_size_pct,
             'max_positions': self.max_positions,
+            'verbose': self.config.verbose,  # <--- ADD THIS LINE
             'use_numba': self.config.use_numba,
             'precompute_indicators': self.config.precompute_indicators,
             'cache_signals': self.config.cache_signals,
