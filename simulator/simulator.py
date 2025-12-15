@@ -1,6 +1,7 @@
 """
 Optimized Simulator with Pre-computation and Parallel Processing
 Maintains bar-by-bar simulation (no look-ahead bias) while optimizing hot paths
+ALWAYS records telemetry - fixed version
 """
 
 import numpy as np
@@ -153,23 +154,114 @@ def create_strategy_instances(strategies):
     return strategy_configs
 
 # ============================================================
-# OPTIMIZED SIMULATION FUNCTIONS
+# DATA COLLECTION FOR TELEMETRY
 # ============================================================
 
-def run_single_strategy_on_symbol(strategy_name: str,  # CHANGED: Pass name, not instance
+def create_trade_attempt_tuple(timestamp, date_str, strategy_name, symbol, signal, 
+                               price, volume, avg_volume_20d, relative_volume,
+                               portfolio_value, cash, num_positions, max_positions,
+                               success, rejection_reason):
+    """Create a tuple for trade attempt data"""
+    return (
+        timestamp,
+        date_str,
+        strategy_name,
+        symbol,
+        signal,
+        price,
+        volume,
+        avg_volume_20d,
+        relative_volume,
+        portfolio_value,
+        cash,
+        num_positions,
+        max_positions,
+        1 if success else 0,  # success as integer
+        rejection_reason
+    )
+
+def create_trade_entry_tuple(strategy_name, symbol, entry_date, entry_price, 
+                             shares, portfolio_value, cash, num_positions,
+                             entry_reason, volume, avg_volume_20d, relative_volume):
+    """Create a tuple for trade entry data - MUST HAVE 14 VALUES"""
+    # Get timestamp from entry_date
+    if isinstance(entry_date, str):
+        entry_date_obj = pd.to_datetime(entry_date)
+    else:
+        entry_date_obj = entry_date
+    
+    timestamp = int(entry_date_obj.timestamp()) if hasattr(entry_date_obj, 'timestamp') else int(time.time())
+    
+    return (
+        strategy_name,                    # 1
+        symbol,                           # 2
+        timestamp,                        # 3 - entry_timestamp
+        str(entry_date),                  # 4 - entry_date
+        entry_price,                      # 5 - entry_price
+        shares,                           # 6 - shares
+        volume,                           # 7 - entry_volume
+        avg_volume_20d,                   # 8 - entry_avg_volume_20d
+        relative_volume,                  # 9 - entry_relative_volume
+        portfolio_value,                  # 10 - entry_portfolio_value
+        cash,                             # 11 - entry_cash
+        num_positions,                    # 12 - entry_num_positions
+        entry_reason                      # 13 - entry_reason
+    )
+
+def create_trade_exit_tuple(exit_timestamp, exit_date, exit_price, volume,
+                            avg_volume_20d, relative_volume, portfolio_value,
+                            cash, profit_loss, profit_loss_pct, holding_days,
+                            holding_bars, forced, exit_reason, strategy_name, symbol):
+    """Create a tuple for trade exit data"""
+    return (
+        exit_timestamp,
+        str(exit_date),
+        exit_price,
+        volume,
+        avg_volume_20d,
+        relative_volume,
+        portfolio_value,
+        cash,
+        profit_loss,
+        profit_loss_pct,
+        holding_days,
+        holding_bars,
+        1 if forced else 0,  # forced as integer
+        exit_reason,
+        strategy_name,
+        symbol
+    )
+
+def create_portfolio_snapshot_tuple(timestamp, strategy_name, date_str,
+                                    portfolio_value, cash, equity_in_positions,
+                                    num_positions, daily_return):
+    """Create a tuple for portfolio snapshot data"""
+    return (
+        timestamp,
+        strategy_name,
+        date_str,
+        portfolio_value,
+        cash,
+        equity_in_positions,
+        num_positions,
+        daily_return
+    )
+
+# ============================================================
+# OPTIMIZED SIMULATION FUNCTIONS (WITH TELEMETRY)
+# ============================================================
+
+def run_single_strategy_on_symbol(strategy_name: str,
                                  strategy_config: Dict,
                                  symbol: str,
                                  stock_data: pd.DataFrame,
                                  spy_data: pd.DataFrame,
-                                 args,
-                                 telemetry: SimulationTelemetry = None,
-                                 buffer: BatchBuffer = None) -> Dict:
+                                 args) -> Dict:
     """
     Run a single strategy on a single symbol
     This function is parallelized across all strategy/symbol combinations
     
-    Note: Strategy instance is created fresh in each process to avoid pickle issues
-    QUIET MODE: No printing for parallel processing
+    Returns ONLY SERIALIZABLE data - no strategy or tracker objects
     """
     try:
         # Load strategy fresh for this process (QUIET MODE)
@@ -184,9 +276,14 @@ def run_single_strategy_on_symbol(strategy_name: str,  # CHANGED: Pass name, not
             verbose=False  # QUIET
         )
         
-        # Store strategy configuration in tracker for telemetry
-        tracker.strategy_config = strategy.get_config()
-        tracker.strategy_instance = strategy
+        # Initialize data collection lists (ALWAYS COLLECT)
+        trade_attempts = []
+        trade_entries = []
+        trade_exits = []
+        portfolio_snapshots = []
+        
+        # Track entry dates for holding period calculation
+        entry_dates = {}
         
         # Bar-by-bar iteration (maintains no look-ahead bias)
         rejected_trades = 0
@@ -207,83 +304,57 @@ def run_single_strategy_on_symbol(strategy_name: str,  # CHANGED: Pass name, not
                 bar_index=i
             )
             
-            # Record trade attempt in telemetry (only if telemetry provided)
-            if telemetry is not None:
-                # Get volume metrics if available
-                volume_metrics = {}
-                if 'volume' in stock_data.columns:
-                    current_volume = stock_data['volume'].iloc[i]
-                    volume_metrics['volume'] = current_volume
-                    
-                    # Calculate average volume (if enough data)
-                    if i >= 19:
-                        avg_volume = stock_data['volume'].iloc[i-19:i+1].mean()
-                        relative_volume = current_volume / avg_volume if avg_volume > 0 else 1.0
-                        volume_metrics['avg_volume_20d'] = avg_volume
-                        volume_metrics['relative_volume'] = relative_volume
+            # Get volume metrics if available
+            volume_metrics = {}
+            if 'volume' in stock_data.columns:
+                current_volume = stock_data['volume'].iloc[i]
+                volume_metrics['volume'] = current_volume
                 
-                # Check if trade would succeed
-                portfolio_value = tracker.get_current_portfolio_value({symbol: current_price})
-                cash = tracker.cash
-                num_positions = tracker.get_current_position_count()
-                max_positions = tracker.max_positions
-                
-                # Determine if trade would be accepted
-                success = False
-                rejection_reason = None
-                
-                if signal == 'BUY':
-                    if num_positions >= max_positions and symbol not in tracker.positions:
-                        rejection_reason = f"Max positions reached ({num_positions}/{max_positions})"
-                    elif cash < 100:  # Minimum trade size
-                        rejection_reason = f"Insufficient cash (${cash:.2f} < $100)"
-                    else:
-                        success = True
-                elif signal == 'SELL':
-                    if tracker.positions.get(symbol, 0) <= 0:
-                        rejection_reason = "No position to sell"
-                    else:
-                        success = True
-                
-                # Record trade attempt
-                if buffer:
-                    buffer.add_attempt(
-                        time.time() if telemetry is None else telemetry._get_simulation_timestamp(current_date),
-                        str(current_date),
-                        strategy.name,
-                        symbol,
-                        signal,
-                        current_price,
-                        volume_metrics.get('volume', 0),
-                        volume_metrics.get('avg_volume_20d', 0),
-                        volume_metrics.get('relative_volume', 1.0),
-                        portfolio_value,
-                        cash,
-                        num_positions,
-                        max_positions,
-                        success,
-                        rejection_reason
-                    )
-                elif telemetry is not None:
-                    telemetry.record_trade_attempt(
-                        strategy.name,
-                        symbol,
-                        signal,
-                        current_price,
-                        current_date,
-                        portfolio_value,
-                        cash,
-                        num_positions,
-                        max_positions,
-                        success,
-                        rejection_reason,
-                        volume=volume_metrics.get('volume', 0),
-                        avg_volume_20d=volume_metrics.get('avg_volume_20d', 0),
-                        relative_volume=volume_metrics.get('relative_volume', 1.0)
-                    )
-                
-                if not success and rejection_reason:
-                    rejected_trades += 1
+                # Calculate average volume (if enough data)
+                if i >= 19:
+                    avg_volume = stock_data['volume'].iloc[i-19:i+1].mean()
+                    relative_volume = current_volume / avg_volume if avg_volume > 0 else 1.0
+                    volume_metrics['avg_volume_20d'] = avg_volume
+                    volume_metrics['relative_volume'] = relative_volume
+            
+            # Check if trade would succeed
+            portfolio_value = tracker.get_current_portfolio_value({symbol: current_price})
+            cash = tracker.cash
+            num_positions = tracker.get_current_position_count()
+            max_positions = tracker.max_positions
+            
+            # Determine if trade would be accepted
+            success = False
+            rejection_reason = None
+            
+            if signal == 'BUY':
+                if num_positions >= max_positions and symbol not in tracker.positions:
+                    rejection_reason = f"Max positions reached ({num_positions}/{max_positions})"
+                elif cash < 100:  # Minimum trade size
+                    rejection_reason = f"Insufficient cash (${cash:.2f} < $100)"
+                else:
+                    success = True
+            elif signal == 'SELL':
+                if tracker.positions.get(symbol, 0) <= 0:
+                    rejection_reason = "No position to sell"
+                else:
+                    success = True
+            
+            # ALWAYS RECORD trade attempt
+            timestamp = time.time()
+            trade_attempts.append(
+                create_trade_attempt_tuple(
+                    timestamp, str(current_date), strategy.name, symbol, signal,
+                    current_price, volume_metrics.get('volume', 0),
+                    volume_metrics.get('avg_volume_20d', 0),
+                    volume_metrics.get('relative_volume', 1.0),
+                    portfolio_value, cash, num_positions, max_positions,
+                    success, rejection_reason
+                )
+            )
+            
+            if not success and rejection_reason:
+                rejected_trades += 1
             
             # Execute trade
             if signal in ['BUY', 'SELL']:
@@ -295,106 +366,100 @@ def run_single_strategy_on_symbol(strategy_name: str,  # CHANGED: Pass name, not
                     volume=volume
                 )
                 
-                # Record successful trade in telemetry (only if telemetry provided)
-                if trade_success and telemetry is not None:
+                # Record successful trade (ALWAYS RECORD)
+                if trade_success:
                     if signal == 'BUY':
                         # Record trade entry
                         portfolio_value = tracker.get_current_portfolio_value({symbol: current_price})
                         cash = tracker.cash
                         num_positions = tracker.get_current_position_count()
                         
-                        if buffer:
-                            buffer.add_entry(
-                                strategy.name,
-                                symbol,
-                                current_date,
-                                current_price,
-                                tracker.positions.get(symbol, 0),
-                                portfolio_value,
-                                cash,
-                                num_positions,
-                                "Strategy signal",
-                                volume,
-                                0,  # avg_volume_20d (not calculated in buffer mode)
-                                1.0  # relative_volume
+                        # Store entry date for holding period calculation
+                        entry_dates[symbol] = current_date
+                        
+                        trade_entries.append(
+                            create_trade_entry_tuple(
+                                strategy.name, symbol, current_date, current_price,
+                                tracker.positions.get(symbol, 0), portfolio_value,
+                                cash, num_positions, "Strategy signal",
+                                volume, volume_metrics.get('avg_volume_20d', 0),
+                                volume_metrics.get('relative_volume', 1.0)
                             )
-                        else:
-                            telemetry.record_trade_entry(
-                                strategy.name,
-                                symbol,
-                                current_date,
-                                current_price,
-                                tracker.positions.get(symbol, 0),
-                                portfolio_value=portfolio_value,
-                                cash=cash,
-                                num_positions=num_positions,
-                                entry_reason="Strategy signal",
-                                volume=volume
-                            )
+                        )
+                        
                     elif signal == 'SELL':
                         # Record trade exit
                         portfolio_value = tracker.get_current_portfolio_value({symbol: current_price})
                         cash = tracker.cash
                         
-                        if buffer:
-                            buffer.add_exit(
-                                time.time() if telemetry is None else telemetry._get_simulation_timestamp(current_date),
-                                current_date,
-                                current_price,
-                                volume,
-                                0,  # avg_volume_20d
-                                1.0,  # relative_volume
-                                portfolio_value,
-                                cash,
-                                None,  # profit_loss (calculated by telemetry)
-                                None,  # profit_loss_pct
-                                0,     # holding_days (calculated by telemetry)
-                                0,     # holding_bars
-                                False, # forced
-                                "Strategy signal",
-                                strategy.name,
-                                symbol
+                        # Calculate holding period
+                        entry_date = entry_dates.get(symbol)
+                        holding_days = 0
+                        holding_bars = 0
+                        if entry_date:
+                            # Convert to pandas Timestamp if needed
+                            if isinstance(entry_date, str):
+                                entry_date = pd.Timestamp(entry_date)
+                            if isinstance(current_date, str):
+                                current_date = pd.Timestamp(current_date)
+                            
+                            holding_days = (current_date - entry_date).days
+                            # Count bars between entry and exit (simplified)
+                            holding_bars = sum(1 for idx in stock_data.index 
+                                             if entry_date <= idx <= current_date)
+                        
+                        # Get trade from tracker's trades (not trade_history)
+                        profit_loss = None
+                        profit_loss_pct = None
+                        
+                        # Look for the SELL trade in tracker.trades
+                        for trade in tracker.trades:
+                            if (trade['symbol'] == symbol and 
+                                trade['action'] == 'SELL' and 
+                                trade['date'] == current_date):
+                                
+                                # Calculate P&L
+                                if 'proceeds' in trade and 'cost' in trade:
+                                    profit_loss = trade['proceeds'] - trade['cost']
+                                    profit_loss_pct = (profit_loss / trade['cost']) * 100 if trade['cost'] > 0 else 0
+                                break
+                        
+                        trade_exits.append(
+                            create_trade_exit_tuple(
+                                timestamp, current_date, current_price, volume,
+                                volume_metrics.get('avg_volume_20d', 0),
+                                volume_metrics.get('relative_volume', 1.0),
+                                portfolio_value, cash, profit_loss,
+                                profit_loss_pct, holding_days, holding_bars,
+                                False, "Strategy signal", strategy.name, symbol
                             )
-                        else:
-                            telemetry.record_trade_exit(
-                                strategy.name,
-                                symbol,
-                                current_date,
-                                current_price,
-                                portfolio_value=portfolio_value,
-                                cash=cash,
-                                forced=False,
-                                reason="Strategy signal",
-                                volume=volume
-                            )
+                        )
             
-            # Record daily snapshot (only if telemetry provided)
-            if telemetry is not None and (i == len(stock_data) - 1 or i % 5 == 0):
-                # Record every 5 bars to reduce database load
+            # Record daily snapshot (every 5 bars to reduce data volume)
+            if i == len(stock_data) - 1 or i % 5 == 0:
                 portfolio_value = tracker.get_current_portfolio_value({symbol: current_price})
                 cash = tracker.cash
                 num_positions = tracker.get_current_position_count()
                 
-                if buffer:
-                    buffer.add_snapshot(
-                        time.time() if telemetry is None else telemetry._get_simulation_timestamp(current_date),
-                        strategy.name,
-                        str(current_date),
-                        portfolio_value,
-                        cash,
-                        portfolio_value - cash,
-                        num_positions,
-                        0.0  # daily_return (not calculated here)
+                # Calculate daily return (simplified)
+                daily_return = 0.0
+                if i > 0:
+                    prev_price = stock_data['close'].iloc[i-1] if i > 0 else current_price
+                    if tracker.positions.get(symbol, 0) > 0:
+                        # Position return
+                        position_return = (current_price - prev_price) / prev_price
+                        position_pct = tracker.positions.get(symbol, 0) * prev_price / (
+                            tracker.get_current_portfolio_value({symbol: prev_price}) if tracker.get_current_portfolio_value({symbol: prev_price}) > 0 else 1
+                        )
+                        daily_return = position_return * position_pct
+                
+                portfolio_snapshots.append(
+                    create_portfolio_snapshot_tuple(
+                        timestamp, strategy.name, str(current_date),
+                        portfolio_value, cash, portfolio_value - cash,
+                        num_positions, daily_return
                     )
-                else:
-                    telemetry.record_daily_snapshot(
-                        strategy.name,
-                        current_date,
-                        portfolio_value,
-                        cash,
-                        portfolio_value - cash,
-                        num_positions
-                    )
+                )
             
             # Update portfolio value
             current_prices = {symbol: current_price}
@@ -404,20 +469,60 @@ def run_single_strategy_on_symbol(strategy_name: str,  # CHANGED: Pass name, not
         if args.force_liquidate:
             final_prices = {symbol: stock_data['close'].iloc[-1]}
             positions_liquidated = tracker.force_liquidate_all(stock_data.index[-1], final_prices)
-            # SILENT: if positions_liquidated > 0:
-            #     print(f"  💰 Force liquidated {positions_liquidated} positions for {strategy.name} on {symbol}")
+            
+            # Record forced exits if any
+            if positions_liquidated > 0:
+                portfolio_value = tracker.get_current_portfolio_value({symbol: final_prices[symbol]})
+                cash = tracker.cash
+                # Use tracker.trades instead of tracker.trade_history
+                for trade in tracker.trades[-positions_liquidated:]:
+                    if trade['symbol'] == symbol and trade.get('forced', False):
+                        # Calculate P&L for forced liquidation
+                        profit_loss = None
+                        profit_loss_pct = None
+                        if 'proceeds' in trade and 'cost' in trade:
+                            profit_loss = trade['proceeds'] - trade['cost']
+                            profit_loss_pct = (profit_loss / trade['cost']) * 100 if trade['cost'] > 0 else 0
+                        
+                        trade_exits.append(
+                            create_trade_exit_tuple(
+                                time.time(), trade['date'], trade['price'], 0,
+                                0, 1.0, portfolio_value, cash, profit_loss,
+                                profit_loss_pct, 0, 0, True, "Forced liquidation",
+                                strategy.name, symbol
+                            )
+                        )
         
+        # Return ONLY SERIALIZABLE data (no tracker objects)
         return {
             'strategy': strategy.name,
             'symbol': symbol,
-            'tracker': tracker,
+            'strategy_config': strategy_config,  # Add config for later
+            'initial_cash': tracker.initial_cash,
+            'final_cash': tracker.cash,
+            'portfolio_value_history': tracker.portfolio_value_history,
+            'portfolio_dates': [str(d) for d in tracker.dates],
+            'positions': tracker.positions.copy(),
+            'trades_summary': {
+                'total_trades': len(tracker.trades),
+                'buy_trades': tracker.get_num_buys(),
+                'sell_trades': tracker.get_num_sells(),
+                'winning_trades': len(tracker.get_winning_trades()),
+                'losing_trades': len(tracker.get_losing_trades())
+            },
             'rejected_trades': rejected_trades,
+            'trade_attempts': trade_attempts,
+            'trade_entries': trade_entries,
+            'trade_exits': trade_exits,
+            'portfolio_snapshots': portfolio_snapshots,
             'success': True
         }
         
     except Exception as e:
-        # SILENT ERROR - don't print in parallel mode
-        # print(f"❌ Error: {strategy_name} on {symbol}: {e}")
+        # STILL REPORT ERRORS - don't silently swallow them
+        print(f"❌ Error in {strategy_name} on {symbol}: {e}")
+        import traceback
+        traceback.print_exc()  # Add traceback for debugging
         return {
             'strategy': strategy_name,
             'symbol': symbol,
@@ -426,23 +531,16 @@ def run_single_strategy_on_symbol(strategy_name: str,  # CHANGED: Pass name, not
         }
 
 # ============================================================
-# MAIN SIMULATION FUNCTION (OPTIMIZED)
+# MAIN SIMULATION FUNCTION (WITH TELEMETRY)
 # ============================================================
 
 def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     """
     Main simulation with pre-computation and parallel processing
-    OPTIMIZED VERSION: No limits, parallel by default, clean output
+    ALWAYS records telemetry - parallel workers collect data, main process writes it
     """
-    # Initialize systems
-    try:
-        from indicator_loader import get_indicator_library
-        indicator_library = get_indicator_library()
-    except ImportError:
-        indicator_library = None
-    
+    # Initialize telemetry system
     telemetry = SimulationTelemetry()
-    buffer = BatchBuffer(telemetry, batch_size=1000)
     
     # Load optimization configuration
     try:
@@ -456,12 +554,12 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         parallel_workers = max(1, mp.cpu_count() - 2)
     
     print(f"\n{'='*70}")
-    print("OPTIMIZED SIMULATION ENGINE")
+    print("OPTIMIZED SIMULATION ENGINE WITH TELEMETRY")
     print(f"{'='*70}")
     print(f"⚡ Strategies: {len(strategies)}")
     print(f"📈 Symbols: {len(symbols)}")
     print(f"🔧 Workers: {parallel_workers} CPU cores")
-    print(f"🚀 Mode: Parallel Processing")
+    print(f"💾 Telemetry: ALWAYS ENABLED")
     print(f"{'='*70}\n")
     
     # STEP 1: Load all data in batch (optimized)
@@ -473,9 +571,6 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     start_date = end_date - pd.Timedelta(days=180)
     
     # Load symbols in batch with progress bar
-    from tqdm import tqdm
-    
-    # Use a progress bar for data loading
     with tqdm(total=len(symbols), desc="Loading data", unit="stock", 
               bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}',
               ncols=80) as pbar:
@@ -488,7 +583,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         # Update progress bar to show completion
         pbar.update(len(symbols))
     
-    # Load SPY data separately (no progress bar for single symbol)
+    # Load SPY data separately
     spy_data = data_manager.get_stock_data('SPY', days=180)
     
     # Filter out None data
@@ -500,18 +595,22 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         print("❌ No data loaded for simulation")
         return None
     
-    # STEP 2: Collect all required indicators (QUIET)
+    # STEP 2: Collect all required indicators
     all_required_indicators = set()
     for strategy in strategies:
         all_required_indicators.update(strategy.required_indicators)
     
-    # STEP 3: Pre-compute indicators for all symbols (QUIET)
+    # STEP 3: Pre-compute indicators for all symbols
     print(f"⚡ Pre-computing {len(all_required_indicators)} indicators...")
     
-    # Set indicator library for strategies
-    for strategy in strategies:
-        if indicator_library is not None:
+    # Set indicator library for strategies if available
+    try:
+        from indicator_loader import get_indicator_library
+        indicator_library = get_indicator_library()
+        for strategy in strategies:
             strategy.set_indicator_library(indicator_library)
+    except ImportError:
+        indicator_library = None
     
     enriched_data_dict = {}
     
@@ -529,7 +628,17 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     
     print(f"✅ Indicators ready\n")
     
-    # STEP 4: Run simulations in parallel
+    # STEP 4: Record simulation start in telemetry
+    telemetry.record_simulation_start(
+        universe_name=args.universe or 'custom',
+        symbols=symbols,
+        start_date=start_date,
+        end_date=end_date,
+        initial_capital=strategies[0].initial_capital if strategies else 100000,
+        config={'optimized': True, 'use_numba': use_numba, 'parallel_workers': parallel_workers}
+    )
+    
+    # STEP 5: Run simulations in parallel and COLLECT ALL DATA
     print("🚀 Running parallel simulations...")
     
     # Create tasks with strategy CONFIGS instead of instances
@@ -542,117 +651,173 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     
     print(f"  Total simulations: {len(tasks)}")
     
-    results = {}
-    rejected_counts = {}
+    # Initialize data collection lists
+    all_trade_attempts = []
+    all_trade_entries = []
+    all_trade_exits = []
+    all_portfolio_snapshots = []
+    
+    # Store strategy performance data (serializable only)
+    strategy_performances = {}
     
     start_time = time.time()
     
-    # ALWAYS USE PARALLEL PROCESSING - ENABLED FOR PRODUCTION
-    use_parallel = True
-    
-    if use_parallel:
-        # PARALLEL PROCESSING with optimized chunk size
-        with ProcessPoolExecutor(max_workers=parallel_workers) as executor:
-            # Submit all tasks
-            futures = {
-                executor.submit(
-                    run_single_strategy_on_symbol,
-                    strategy_name, strategy_config, symbol, 
-                    enriched_data_dict[symbol], spy_data, args,
-                    None, None  # Don't pass telemetry/buffer in parallel mode
-                ): (strategy_name, symbol)
-                for strategy_name, strategy_config, symbol in tasks
-            }
-            
-            # Clean progress bar - single line only
-            with tqdm(total=len(futures), 
-                     desc="Simulating", 
-                     unit="sim",
-                     bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
-                     ncols=100) as pbar:
-                
-                for future in as_completed(futures):
-                    strategy_name, symbol = futures[future]
-                    
-                    try:
-                        result = future.result()
-                        
-                        if result['success']:
-                            if strategy_name not in results:
-                                results[strategy_name] = {}
-                            results[strategy_name][symbol] = result['tracker']
-                            rejected_counts[strategy_name] = rejected_counts.get(strategy_name, 0) + result['rejected_trades']
-                    
-                    except Exception as e:
-                        # Silent failure in parallel mode
-                        pass
-                    
-                    pbar.update(1)
-    else:
-        # SEQUENTIAL PROCESSING (for debugging only)
-        print(f"\n📈 Running {len(tasks)} simulations sequentially...")
+    # ALWAYS USE PARALLEL PROCESSING
+    with ProcessPoolExecutor(max_workers=parallel_workers) as executor:
+        # Submit all tasks
+        futures = {
+            executor.submit(
+                run_single_strategy_on_symbol,
+                strategy_name, strategy_config, symbol, 
+                enriched_data_dict[symbol], spy_data, args
+            ): (strategy_name, symbol)
+            for strategy_name, strategy_config, symbol in tasks
+        }
         
-        with tqdm(total=len(tasks), desc="Simulating", unit="sim",
+        # Process results as they complete
+        with tqdm(total=len(futures), 
+                 desc="Simulating", 
+                 unit="sim",
                  bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
                  ncols=100) as pbar:
             
-            for strategy_name, strategy_config, symbol in tasks:
-                pbar.set_description(f"Simulating [{strategy_name[:15]}] {symbol}")
+            for future in as_completed(futures):
+                strategy_name, symbol = futures[future]
                 
-                result = run_single_strategy_on_symbol(
-                    strategy_name, strategy_config, symbol,
-                    enriched_data_dict[symbol], spy_data, args,
-                    telemetry, buffer
-                )
-                
-                if result['success']:
-                    if strategy_name not in results:
-                        results[strategy_name] = {}
-                    results[strategy_name][symbol] = result['tracker']
-                    rejected_counts[strategy_name] = rejected_counts.get(strategy_name, 0) + result['rejected_trades']
+                try:
+                    result = future.result()
+                    
+                    if result['success']:
+                        # Store performance data (serializable only)
+                        if strategy_name not in strategy_performances:
+                            strategy_performances[strategy_name] = {
+                                'config': result.get('strategy_config', {}),
+                                'symbols': [],
+                                'initial_cash': result.get('initial_cash', 0),
+                                'final_cash': 0,
+                                'portfolio_value_history': [],
+                                'rejected_trades': 0,
+                                'trades_summary': {
+                                    'total_trades': 0,
+                                    'buy_trades': 0,
+                                    'sell_trades': 0,
+                                    'winning_trades': 0,
+                                    'losing_trades': 0
+                                }
+                            }
+                        
+                        # Update performance data
+                        perf = strategy_performances[strategy_name]
+                        perf['symbols'].append(symbol)
+                        perf['final_cash'] += result.get('final_cash', 0)
+                        
+                        # Aggregate portfolio value history (use last value for now)
+                        if result.get('portfolio_value_history'):
+                            perf['portfolio_value_history'].append(result['portfolio_value_history'][-1])
+                        
+                        perf['rejected_trades'] += result.get('rejected_trades', 0)
+                        
+                        # Update trades summary
+                        trades_summary = result.get('trades_summary', {})
+                        perf['trades_summary']['total_trades'] += trades_summary.get('total_trades', 0)
+                        perf['trades_summary']['buy_trades'] += trades_summary.get('buy_trades', 0)
+                        perf['trades_summary']['sell_trades'] += trades_summary.get('sell_trades', 0)
+                        perf['trades_summary']['winning_trades'] += trades_summary.get('winning_trades', 0)
+                        perf['trades_summary']['losing_trades'] += trades_summary.get('losing_trades', 0)
+                        
+                        # COLLECT ALL TELEMETRY DATA
+                        all_trade_attempts.extend(result.get('trade_attempts', []))
+                        all_trade_entries.extend(result.get('trade_entries', []))
+                        all_trade_exits.extend(result.get('trade_exits', []))
+                        all_portfolio_snapshots.extend(result.get('portfolio_snapshots', []))
+                    
+                except Exception as e:
+                    # Show errors clearly
+                    print(f"\n❌ Error processing {strategy_name} on {symbol}: {e}")
+                    import traceback
+                    traceback.print_exc()
                 
                 pbar.update(1)
     
     simulation_time = time.time() - start_time
     
-    # STEP 5: Finalize telemetry
-    print(f"\n💾 Recording final results...")
+    # STEP 6: WRITE ALL COLLECTED DATA TO DATABASE
+    print(f"\n💾 Recording telemetry data...")
     
-    # Record simulation start
-    telemetry.record_simulation_start(
-        universe_name=args.universe or 'custom',
-        symbols=symbols,
-        start_date=start_date,
-        end_date=end_date,
-        initial_capital=strategies[0].initial_capital if strategies else 100000,
-        config={'optimized': True, 'use_numba': use_numba, 'parallel_workers': parallel_workers}
-    )
+    # Write trade attempts
+    if all_trade_attempts:
+        print(f"  📝 Writing {len(all_trade_attempts)} trade attempts...")
+        telemetry.batch_insert_trade_attempts(all_trade_attempts)
+
+    # Write trade entries
+    if all_trade_entries:
+        print(f"  📈 Writing {len(all_trade_entries)} trade entries...")
+        telemetry.batch_insert_trade_entries(all_trade_entries)
     
-    # Finalize each strategy
-    for strategy_name, symbol_trackers in results.items():
-        if symbol_trackers:
-            # Find first tracker for this strategy
-            first_tracker = next(iter(symbol_trackers.values()))
-            rejected_count = rejected_counts.get(strategy_name, 0)
+    # Write trade exits
+    if all_trade_exits:
+        print(f"  📉 Writing {len(all_trade_exits)} trade exits...")
+        telemetry.batch_update_trade_exits(all_trade_exits)
+    
+    # Write portfolio snapshots
+    if all_portfolio_snapshots:
+        print(f"  📊 Writing {len(all_portfolio_snapshots)} portfolio snapshots...")
+        telemetry.batch_insert_portfolio_snapshots(all_portfolio_snapshots)
+    
+    # STEP 7: Create and finalize strategy performance records
+    print(f"\n📊 Finalizing strategy performance...")
+    
+    # Calculate SPY returns for alpha/beta
+    spy_returns = None
+    if spy_data is not None and 'close' in spy_data.columns:
+        spy_returns = spy_data['close'].pct_change().dropna()
+    
+    for strategy_name, perf_data in strategy_performances.items():
+        if perf_data['symbols']:
+            # Create a simple tracker with serializable data only
+            from strategy_tracker import StrategyTracker
             
-            # Calculate SPY returns for alpha/beta
-            spy_returns = None
-            if spy_data is not None and 'close' in spy_data.columns:
-                spy_returns = spy_data['close'].pct_change().dropna()
+            # Create tracker with just the data we have
+            tracker = StrategyTracker(
+                strategy_name,
+                initial_cash=perf_data['initial_cash'],
+                position_size_pct=perf_data['config'].get('position_size_pct', 0.10),
+                max_positions=perf_data['config'].get('max_positions', 10),
+                verbose=False
+            )
+            
+            # Update tracker with our aggregated data
+            tracker.cash = perf_data.get('final_cash', perf_data['initial_cash'])
+            
+            # Set portfolio value history if we have it
+            if perf_data['portfolio_value_history']:
+                # Use average as approximation (since we can't reconstruct full history)
+                avg_value = np.mean(perf_data['portfolio_value_history'])
+                tracker.portfolio_value_history = [avg_value]
+                tracker.dates = [pd.Timestamp.now()]  # Approximate
+            
+            # Store config for telemetry
+            tracker.strategy_config = perf_data['config']
             
             # Finalize strategy in telemetry
             telemetry.finalize_strategy(
                 strategy_name=strategy_name,
-                tracker=first_tracker,
+                tracker=tracker,
                 spy_returns=spy_returns,
-                rejected_count=rejected_count
+                rejected_count=perf_data.get('rejected_trades', 0)
             )
+            
+            trades_summary = perf_data['trades_summary']
+            total_trades = trades_summary.get('total_trades', 0)
+            completed_trades = trades_summary.get('sell_trades', 0)  # Rough approximation
+            
+            print(f"  ✅ {strategy_name}: {len(perf_data['symbols'])} symbols, "
+                  f"{trades_summary.get('winning_trades', 0)} wins, "
+                  f"{trades_summary.get('losing_trades', 0)} losses, "
+                  f"{perf_data.get('rejected_trades', 0)} rejected trades")
     
     # Record simulation end
     telemetry.record_simulation_end()
-    
-    # Flush any remaining buffer data
-    buffer.flush_all()
     
     # Print summary
     total_sims = len(tasks)
@@ -662,12 +827,20 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         calc_per_second = 0
     
     print(f"\n{'='*70}")
-    print("✅ SIMULATION COMPLETE")
+    print("✅ SIMULATION COMPLETE WITH TELEMETRY")
     print(f"{'='*70}")
     print(f"📊 Completed: {total_sims} simulations")
     print(f"⏱️  Time: {simulation_time:.1f}s ({simulation_time/total_sims:.2f}s per sim)")
     print(f"⚡ Speed: {calc_per_second:,.0f} calculations/sec")
-    print(f"💾 Results: {telemetry.db_path}")
+    print(f"💾 Database: {telemetry.db_path}")
+    
+    # Data recording summary
+    print(f"\n📈 TELEMETRY RECORDED:")
+    print(f"   Trade attempts: {len(all_trade_attempts):,}")
+    print(f"   Trade entries: {len(all_trade_entries):,}")
+    print(f"   Trade exits: {len(all_trade_exits):,}")
+    print(f"   Portfolio snapshots: {len(all_portfolio_snapshots):,}")
+    print(f"   Strategies finalized: {len(strategy_performances):,}")
     
     # Print performance improvement estimate
     if total_sims > 0 and simulation_time > 0:
@@ -680,15 +853,15 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     return telemetry.db_path
 
 # ============================================================
-# PERFORMANCE TESTING
+# PERFORMANCE TESTING (UPDATED)
 # ============================================================
 
-def test_performance_improvement(strategies, symbols, data_manager, args):
+def test_performance_improvement(strategies, symbols, data_manager, universe_manager, args):
     """
-    Test performance improvement with optimizations
+    Test performance improvement with optimizations and telemetry
     """
     print(f"\n{'='*70}")
-    print("PERFORMANCE TEST")
+    print("PERFORMANCE TEST WITH TELEMETRY")
     print(f"{'='*70}")
     
     # Test with a subset
@@ -696,7 +869,7 @@ def test_performance_improvement(strategies, symbols, data_manager, args):
     test_strategies = strategies[:2] if len(strategies) > 2 else strategies
     
     print(f"Testing with {len(test_strategies)} strategies and {len(test_symbols)} symbols")
-    print(f"Expected improvement: 5-15x speedup")
+    print(f"Expected improvement: 5-15x speedup with telemetry")
     print(f"{'='*70}\n")
     
     # Time the simulation
@@ -714,8 +887,23 @@ def test_performance_improvement(strategies, symbols, data_manager, args):
     print(f"   Baseline estimate: {estimated_baseline:.1f}s")
     print(f"   Actual: {elapsed:.2f}s")
     
+    # Verify data was written
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    tables = ['trade_attempts', 'trade_history', 'portfolio_history', 'strategy_performance']
+    print(f"\n📊 Database verification:")
+    for table in tables:
+        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+        count = cursor.fetchone()[0]
+        status = "✅" if count > 0 else "❌"
+        print(f"  {status} {table}: {count} rows")
+    
+    conn.close()
+    
     if speedup > 3:
-        print(f"🎉 Great! Optimizations are working well")
+        print(f"🎉 Great! Optimizations are working well with telemetry")
     else:
         print(f"⚠️  Speedup less than expected. Check configuration.")
     

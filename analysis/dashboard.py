@@ -1,3 +1,5 @@
+# File: dashboard.py
+
 """
 Main Strategy Dashboard
 All UI and button functionality
@@ -30,7 +32,7 @@ from analysis_functions import (
     show_portfolio_risk,
     show_performance_timeline
 )
-from mock_trackers import MockTracker, MockStrategy
+# REMOVED: from mock_trackers import MockTracker, MockStrategy  # This no longer exists
 
 
 def show_strategy_dashboard(reader, strategy_name, all_strategies=None):
@@ -256,40 +258,60 @@ def show_strategy_dashboard(reader, strategy_name, all_strategies=None):
         ax_stocks.axis('off')
         
         try:
+            # Use the new direct database method for stock performance
             stock_perf = reader.get_stock_performance(strategy_name)
             
             if not stock_perf.empty:
                 # Show top 10 stocks
                 top_stocks = stock_perf.head(10)
                 
-                stock_data = [['Symbol', 'Trades', 'Total P&L', 'Avg P&L', 'Win Rate']]
-                for _, row in top_stocks.iterrows():
-                    stock_data.append([
-                        row['symbol'],
-                        f"{int(row['num_trades'])}",
-                        f"${row['total_pnl']:+,.0f}",
-                        f"${row['avg_pnl']:+,.0f}",
-                        f"{row['win_rate']:.0f}%" if 'win_rate' in row else 'N/A'
-                    ])
+                # Check what columns are available in the database
+                columns_available = list(stock_perf.columns)
+                print(f"  Available stock performance columns: {columns_available}")
                 
-                table = ax_stocks.table(cellText=stock_data, cellLoc='center',
-                                       loc='center', colWidths=[0.2, 0.2, 0.2, 0.2, 0.2])
-                table.auto_set_font_size(False)
-                table.set_fontsize(8)
-                table.scale(1, 2)
-                
-                # Header styling
-                for i in range(5):
-                    table[(0, i)].set_facecolor('#1565C0')
-                    table[(0, i)].set_text_props(weight='bold', color='white')
-                
-                ax_stocks.set_title('Top 10 Stock Performance', fontweight='bold', pad=15)
-                print("  ✅ Stock performance table created")
+                # Use available columns - adapt to what's in the database
+                if 'symbol' in stock_perf.columns:
+                    stock_data = [['Symbol', 'Trades', 'Total P&L', 'Avg P&L', 'Win Rate']]
+                    for _, row in top_stocks.iterrows():
+                        # Extract values with fallbacks if columns don't exist
+                        symbol = row['symbol'] if 'symbol' in row else 'N/A'
+                        num_trades = row.get('num_trades', row.get('total_trades', 'N/A'))
+                        total_pnl = row.get('total_pnl', row.get('net_profit_loss', 0))
+                        avg_pnl = row.get('avg_pnl', row.get('average_profit_loss', 0))
+                        win_rate = row.get('win_rate', row.get('win_rate_pct', 'N/A'))
+                        
+                        stock_data.append([
+                            symbol,
+                            f"{int(num_trades)}" if isinstance(num_trades, (int, float)) else str(num_trades),
+                            f"${total_pnl:+,.0f}" if isinstance(total_pnl, (int, float)) else str(total_pnl),
+                            f"${avg_pnl:+,.0f}" if isinstance(avg_pnl, (int, float)) else str(avg_pnl),
+                            f"{win_rate:.0f}%" if isinstance(win_rate, (int, float)) else str(win_rate)
+                        ])
+                    
+                    table = ax_stocks.table(cellText=stock_data, cellLoc='center',
+                                           loc='center', colWidths=[0.2, 0.2, 0.2, 0.2, 0.2])
+                    table.auto_set_font_size(False)
+                    table.set_fontsize(8)
+                    table.scale(1, 2)
+                    
+                    # Header styling
+                    for i in range(5):
+                        table[(0, i)].set_facecolor('#1565C0')
+                        table[(0, i)].set_text_props(weight='bold', color='white')
+                    
+                    ax_stocks.set_title('Top 10 Stock Performance', fontweight='bold', pad=15)
+                    print("  ✅ Stock performance table created")
+                else:
+                    # If we don't have the expected columns, show a simplified view
+                    ax_stocks.text(0.5, 0.5, f'Stock performance data available ({len(stock_perf)} stocks)', 
+                                 ha='center', va='center', transform=ax_stocks.transAxes)
             else:
                 ax_stocks.text(0.5, 0.5, 'No stock performance data', 
                              ha='center', va='center', transform=ax_stocks.transAxes)
         except Exception as e:
             print(f"  ❌ Stock performance error: {e}")
+            import traceback
+            traceback.print_exc()
             ax_stocks.text(0.5, 0.5, f'Error: {e}', 
                          ha='center', va='center', transform=ax_stocks.transAxes)
         

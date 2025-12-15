@@ -657,7 +657,7 @@ class SimulationTelemetry:
         
         Args:
             entries_list: List of tuples matching trade_history schema
-            Each tuple should have 14 values
+            Each tuple should have 13 values (trade_status 'OPEN' is hardcoded in SQL)
         """
         if not entries_list:
             return
@@ -668,15 +668,15 @@ class SimulationTelemetry:
         cursor.executemany('''
             INSERT INTO trade_history
             (strategy_name, symbol, entry_timestamp, entry_date, entry_price, shares,
-             entry_volume, entry_avg_volume_20d, entry_relative_volume,
-             entry_portfolio_value, entry_cash, entry_num_positions, 
-             trade_status, entry_reason)
+            entry_volume, entry_avg_volume_20d, entry_relative_volume,
+            entry_portfolio_value, entry_cash, entry_num_positions, 
+            trade_status, entry_reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
         ''', entries_list)
         
         conn.commit()
         conn.close()
-
+    
     def batch_update_trade_exits(self, exits_list):
         """
         Batch update trade exits with volume

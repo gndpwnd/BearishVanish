@@ -1,50 +1,64 @@
 """
-Enterprise-Grade Risk Analysis Module
-Comprehensive risk metrics used by banks, hedge funds, and trading firms
+Risk Analysis Module - REFACTORED FOR DATABASE
+NO MockTracker dependency - works directly with SimulationReader
+
+Enterprise-grade risk metrics using only database access
 """
 
 import numpy as np
 import pandas as pd
 from datetime import datetime
 
-class RiskAnalyzer:
+
+class RiskAnalyzerDB:
     """
     Comprehensive risk analysis for trading strategies
-    Implements industry-standard risk metrics and reporting
+    Works directly with SimulationReader - NO mock objects
     """
     
-    def __init__(self, tracker, spy_tracker=None, risk_free_rate=0.0):
+    def __init__(self, reader, strategy_name, benchmark='SPY', risk_free_rate=0.0):
         """
         Initialize risk analyzer
         
         Args:
-            tracker: StrategyTracker instance
-            spy_tracker: Benchmark tracker (optional)
+            reader: SimulationReader instance
+            strategy_name: Strategy to analyze
+            benchmark: Benchmark strategy name (default: 'SPY')
             risk_free_rate: Annual risk-free rate (default: 0%)
         """
-        self.tracker = tracker
-        self.spy_tracker = spy_tracker
+        self.reader = reader
+        self.strategy_name = strategy_name
+        self.benchmark = benchmark
         self.risk_free_rate = risk_free_rate
         
+        # Load data from database
+        self._load_data()
+    
+    def _load_data(self):
+        """Load all necessary data from database"""
+        # Get portfolio history for returns calculation
+        self.portfolio = self.reader.get_portfolio_history(self.strategy_name)
+        
         # Calculate returns series
-        self.returns = self._calculate_returns()
-        self.spy_returns = self._calculate_spy_returns() if spy_tracker else None
-    
-    def _calculate_returns(self):
-        """Calculate daily returns series"""
-        if len(self.tracker.portfolio_value_history) < 2:
-            return pd.Series()
+        if not self.portfolio.empty:
+            self.returns = self.portfolio['portfolio_value'].pct_change().dropna()
+        else:
+            self.returns = pd.Series()
         
-        values = pd.Series(self.tracker.portfolio_value_history)
-        return values.pct_change().dropna()
-    
-    def _calculate_spy_returns(self):
-        """Calculate SPY daily returns"""
-        if len(self.spy_tracker.portfolio_value_history) < 2:
-            return pd.Series()
+        # Get benchmark returns if available
+        benchmark_portfolio = self.reader.get_portfolio_history(self.benchmark)
+        if not benchmark_portfolio.empty:
+            self.benchmark_returns = benchmark_portfolio['portfolio_value'].pct_change().dropna()
+        else:
+            self.benchmark_returns = None
         
-        values = pd.Series(self.spy_tracker.portfolio_value_history)
-        return values.pct_change().dropna()
+        # Get trade data
+        self.all_trades = self.reader.get_trade_history(self.strategy_name)
+        self.closed_trades = self.reader.get_closed_trades(self.strategy_name)
+        self.open_positions = self.reader.get_open_positions(self.strategy_name)
+        
+        # Get pre-computed performance metrics
+        self.performance = self.reader.get_strategy_performance(self.strategy_name)
     
     # ============================================================
     # BASIC RISK METRICS
@@ -63,8 +77,7 @@ class RiskAnalyzer:
         vol = self.returns.std()
         
         if annualize:
-            # Annualize: sqrt(252 trading days) for daily returns
-            # For hourly: sqrt(252 * 6.5) = sqrt(1638)
+            # Annualize: sqrt(252 trading days * 6.5 hours)
             vol *= np.sqrt(252 * 6.5)
         
         return vol * 100  # Return as percentage
@@ -73,18 +86,10 @@ class RiskAnalyzer:
         """
         Calculate downside deviation (semi-deviation)
         Only considers returns below target
-        
-        Args:
-            target_return: Minimum acceptable return (default: 0)
-            annualize: Whether to annualize the result
-        
-        Returns:
-            float: Downside deviation percentage
         """
         if len(self.returns) == 0:
             return 0.0
         
-        # Filter for returns below target
         downside_returns = self.returns[self.returns < target_return]
         
         if len(downside_returns) == 0:
@@ -101,46 +106,28 @@ class RiskAnalyzer:
         """
         Calculate Value at Risk (VaR)
         Estimated maximum loss at given confidence level
-        
-        Args:
-            confidence: Confidence level (e.g., 0.95 for 95%)
-        
-        Returns:
-            float: VaR as percentage (positive number = loss)
         """
         if len(self.returns) == 0:
             return 0.0
         
-        # Historical VaR (percentile method)
         var = np.percentile(self.returns, (1 - confidence) * 100)
-        
         return abs(var) * 100
     
     def get_cvar(self, confidence=0.95):
         """
         Calculate Conditional Value at Risk (CVaR / Expected Shortfall)
         Average loss beyond VaR threshold
-        
-        Args:
-            confidence: Confidence level
-        
-        Returns:
-            float: CVaR as percentage
         """
         if len(self.returns) == 0:
             return 0.0
         
         var_threshold = np.percentile(self.returns, (1 - confidence) * 100)
-        
-        # Average of returns worse than VaR
         tail_losses = self.returns[self.returns <= var_threshold]
         
         if len(tail_losses) == 0:
             return 0.0
         
-        cvar = tail_losses.mean()
-        
-        return abs(cvar) * 100
+        return abs(tail_losses.mean()) * 100
     
     # ============================================================
     # DRAWDOWN ANALYSIS
@@ -153,11 +140,11 @@ class RiskAnalyzer:
         Returns:
             dict: Detailed drawdown metrics
         """
-        if len(self.tracker.portfolio_value_history) == 0:
+        if self.portfolio.empty:
             return {}
         
-        values = np.array(self.tracker.portfolio_value_history)
-        dates = self.tracker.dates
+        values = self.portfolio['portfolio_value'].values
+        dates = self.portfolio['date'].values
         
         # Calculate running maximum
         running_max = np.maximum.accumulate(values)
@@ -181,14 +168,14 @@ class RiskAnalyzer:
         for i in range(max_dd_idx, len(values)):
             if values[i] >= peak_value:
                 recovery_idx = i
-                recovery_days = (dates[i] - dates[max_dd_idx]).days
+                recovery_days = (dates[i] - dates[max_dd_idx]).astype('timedelta64[D]').astype(int)
                 break
         
         # Calculate average drawdown
         avg_dd = np.mean(drawdowns[drawdowns < 0])
         
-        # Count drawdown periods
-        in_drawdown = drawdowns < -1  # Drawdown > 1%
+        # Count drawdown periods (>1% drawdown)
+        in_drawdown = drawdowns < -1
         drawdown_changes = np.diff(in_drawdown.astype(int))
         num_drawdowns = np.sum(drawdown_changes == 1)
         
@@ -199,7 +186,7 @@ class RiskAnalyzer:
             'trough_date': dates[max_dd_idx],
             'recovery_date': dates[recovery_idx] if recovery_idx else None,
             'recovery_days': recovery_days,
-            'avg_drawdown_pct': abs(avg_dd),
+            'avg_drawdown_pct': abs(avg_dd) if not np.isnan(avg_dd) else 0,
             'num_drawdown_periods': num_drawdowns,
             'currently_in_drawdown': drawdowns[-1] < -1,
             'current_drawdown_pct': abs(drawdowns[-1]) if drawdowns[-1] < 0 else 0
@@ -210,10 +197,7 @@ class RiskAnalyzer:
     # ============================================================
     
     def get_sharpe_ratio(self, annualize=True):
-        """
-        Calculate Sharpe Ratio
-        (Return - Risk Free Rate) / Volatility
-        """
+        """Calculate Sharpe Ratio"""
         if len(self.returns) == 0:
             return 0.0
         
@@ -230,15 +214,12 @@ class RiskAnalyzer:
         return sharpe
     
     def get_sortino_ratio(self, target_return=0.0, annualize=True):
-        """
-        Calculate Sortino Ratio
-        Like Sharpe but only penalizes downside volatility
-        """
+        """Calculate Sortino Ratio (only penalizes downside volatility)"""
         if len(self.returns) == 0:
             return 0.0
         
         excess_returns = self.returns - (target_return / 252 / 6.5)
-        downside_dev = self.get_downside_deviation(target_return, annualize=False)
+        downside_dev = self.get_downside_deviation(target_return, annualize=False) / 100
         
         if downside_dev == 0:
             return 0.0
@@ -251,29 +232,32 @@ class RiskAnalyzer:
         return sortino
     
     def get_calmar_ratio(self):
-        """
-        Calculate Calmar Ratio
-        Annualized Return / Max Drawdown
-        """
+        """Calculate Calmar Ratio (Annual Return / Max Drawdown)"""
         dd_analysis = self.get_max_drawdown_analysis()
         max_dd = dd_analysis.get('max_drawdown_pct', 0)
         
         if max_dd == 0:
             return 0.0
         
-        # Annualize return
-        total_return = self.tracker.get_return_pct()
-        days = (self.tracker.dates[-1] - self.tracker.dates[0]).days
-        annual_return = (total_return / 100 + 1) ** (365 / days) - 1
-        annual_return *= 100
+        # Get annualized return
+        if not self.performance:
+            return 0.0
+        
+        total_return = self.performance.get('total_return_pct', 0)
+        
+        # Annualize if needed
+        dates = self.portfolio['date']
+        if len(dates) > 1:
+            days = (dates.iloc[-1] - dates.iloc[0]).days
+            annual_return = (total_return / 100 + 1) ** (365 / days) - 1
+            annual_return *= 100
+        else:
+            annual_return = total_return
         
         return annual_return / max_dd
     
     def get_omega_ratio(self, threshold=0.0):
-        """
-        Calculate Omega Ratio
-        Probability-weighted ratio of gains vs losses
-        """
+        """Calculate Omega Ratio (probability-weighted gains vs losses)"""
         if len(self.returns) == 0:
             return 0.0
         
@@ -296,76 +280,71 @@ class RiskAnalyzer:
     # ============================================================
     
     def get_beta(self):
-        """
-        Calculate portfolio Beta vs benchmark
-        Measures systematic risk
-        """
-        if self.spy_returns is None or len(self.spy_returns) == 0:
+        """Calculate portfolio Beta vs benchmark"""
+        if self.benchmark_returns is None or len(self.benchmark_returns) == 0:
             return None
         
         # Align returns
-        min_len = min(len(self.returns), len(self.spy_returns))
+        min_len = min(len(self.returns), len(self.benchmark_returns))
         portfolio_rets = self.returns.iloc[-min_len:]
-        spy_rets = self.spy_returns.iloc[-min_len:]
+        bench_rets = self.benchmark_returns.iloc[-min_len:]
         
-        if spy_rets.var() == 0:
+        if bench_rets.var() == 0:
             return None
         
-        covariance = portfolio_rets.cov(spy_rets)
-        spy_variance = spy_rets.var()
+        covariance = portfolio_rets.cov(bench_rets)
+        bench_variance = bench_rets.var()
         
-        return covariance / spy_variance
+        return covariance / bench_variance
     
     def get_alpha(self, annualize=True):
-        """
-        Calculate Jensen's Alpha
-        Excess return above what CAPM predicts
-        """
+        """Calculate Jensen's Alpha"""
         beta = self.get_beta()
-        if beta is None:
+        if beta is None or not self.performance:
             return None
         
-        portfolio_return = self.tracker.get_return_pct()
-        spy_return = self.spy_tracker.get_return_pct() if self.spy_tracker else 0
+        portfolio_return = self.performance.get('total_return_pct', 0)
+        
+        # Get benchmark return
+        benchmark_perf = self.reader.get_strategy_performance(self.benchmark)
+        if not benchmark_perf:
+            return None
+        
+        bench_return = benchmark_perf.get('total_return_pct', 0)
         
         # Alpha = Portfolio Return - (Risk-free + Beta × (Market Return - Risk-free))
-        alpha = portfolio_return - (self.risk_free_rate + beta * (spy_return - self.risk_free_rate))
+        alpha = portfolio_return - (self.risk_free_rate + beta * (bench_return - self.risk_free_rate))
         
         if annualize:
-            days = (self.tracker.dates[-1] - self.tracker.dates[0]).days
-            annual_factor = 365 / days
-            alpha *= annual_factor
+            dates = self.portfolio['date']
+            if len(dates) > 1:
+                days = (dates.iloc[-1] - dates.iloc[0]).days
+                alpha *= (365 / days)
         
         return alpha
     
     def get_correlation(self):
-        """
-        Calculate correlation with benchmark
-        Measures how closely returns move together
-        """
-        if self.spy_returns is None or len(self.spy_returns) == 0:
+        """Calculate correlation with benchmark"""
+        if self.benchmark_returns is None or len(self.benchmark_returns) == 0:
             return None
         
-        min_len = min(len(self.returns), len(self.spy_returns))
+        min_len = min(len(self.returns), len(self.benchmark_returns))
         portfolio_rets = self.returns.iloc[-min_len:]
-        spy_rets = self.spy_returns.iloc[-min_len:]
+        bench_rets = self.benchmark_returns.iloc[-min_len:]
         
-        return portfolio_rets.corr(spy_rets)
+        return portfolio_rets.corr(bench_rets)
     
     def get_information_ratio(self, annualize=True):
-        """
-        Calculate Information Ratio
-        Risk-adjusted excess return vs benchmark
-        """
-        if self.spy_returns is None or len(self.spy_returns) == 0:
+        """Calculate Information Ratio (risk-adjusted excess return vs benchmark)"""
+        if self.benchmark_returns is None or len(self.benchmark_returns) == 0:
             return None
         
-        min_len = min(len(self.returns), len(self.spy_returns))
+        min_len = min(len(self.returns), len(self.benchmark_returns))
         portfolio_rets = self.returns.iloc[-min_len:]
-        spy_rets = self.spy_returns.iloc[-min_len:]
+        bench_rets = self.benchmark_returns.iloc[-min_len:]
         
         # Excess returns (active returns)
-        excess_returns = portfolio_rets - spy_rets
+        excess_returns = portfolio_rets - bench_rets
         
         # Tracking error (volatility of excess returns)
         tracking_error = excess_returns.std()
@@ -381,10 +360,7 @@ class RiskAnalyzer:
         return ir
     
     def get_treynor_ratio(self, annualize=True):
-        """
-        Calculate Treynor Ratio
-        Excess return per unit of systematic risk (Beta)
-        """
+        """Calculate Treynor Ratio (excess return per unit of systematic risk)"""
         beta = self.get_beta()
         if beta is None or beta == 0:
             return None
@@ -402,35 +378,30 @@ class RiskAnalyzer:
     # ============================================================
     
     def get_trade_metrics(self):
-        """
-        Comprehensive trade-level analysis
-        
-        Returns:
-            dict: Trade statistics
-        """
-        wins = self.tracker.get_winning_trades()
-        losses = self.tracker.get_losing_trades()
-        
-        total_trades = len(wins) + len(losses)
-        
-        if total_trades == 0:
+        """Comprehensive trade-level analysis"""
+        if self.closed_trades.empty:
             return {}
         
+        wins = self.closed_trades[self.closed_trades['profit_loss_dollars'] > 0]
+        losses = self.closed_trades[self.closed_trades['profit_loss_dollars'] < 0]
+        
+        total_trades = len(self.closed_trades)
+        
         # Calculate metrics
-        win_rate = len(wins) / total_trades * 100
+        win_rate = len(wins) / total_trades * 100 if total_trades > 0 else 0
         
-        win_amounts = [w.get('profit_loss_dollars', 0) for w in wins if w.get('profit_loss_dollars', 0) > 0]
-        loss_amounts = [abs(l.get('profit_loss_dollars', 0)) for l in losses if l.get('profit_loss_dollars', 0) < 0]
+        win_amounts = wins['profit_loss_dollars'].values
+        loss_amounts = abs(losses['profit_loss_dollars'].values)
         
-        avg_win = np.mean(win_amounts) if win_amounts else 0
-        avg_loss = np.mean(loss_amounts) if loss_amounts else 0
+        avg_win = win_amounts.mean() if len(win_amounts) > 0 else 0
+        avg_loss = loss_amounts.mean() if len(loss_amounts) > 0 else 0
         
-        max_win = max(win_amounts) if win_amounts else 0
-        max_loss = max(loss_amounts) if loss_amounts else 0
+        max_win = win_amounts.max() if len(win_amounts) > 0 else 0
+        max_loss = loss_amounts.max() if len(loss_amounts) > 0 else 0
         
         # Profit factor
-        gross_profit = sum(win_amounts)
-        gross_loss = sum(loss_amounts)
+        gross_profit = win_amounts.sum() if len(win_amounts) > 0 else 0
+        gross_loss = loss_amounts.sum() if len(loss_amounts) > 0 else 0
         profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
         
         # Risk/Reward ratio
@@ -440,14 +411,9 @@ class RiskAnalyzer:
         expectancy = (win_rate / 100 * avg_win) - ((1 - win_rate / 100) * avg_loss)
         
         # Win/Loss streaks
-        trade_outcomes = []
-        for _ in wins:
-            trade_outcomes.append(1)
-        for _ in losses:
-            trade_outcomes.append(0)
-        
-        max_win_streak = self._calculate_max_streak(trade_outcomes, 1)
-        max_loss_streak = self._calculate_max_streak(trade_outcomes, 0)
+        outcomes = (self.closed_trades['profit_loss_dollars'] > 0).astype(int).values
+        max_win_streak = self._calculate_max_streak(outcomes, 1)
+        max_loss_streak = self._calculate_max_streak(outcomes, 0)
         
         return {
             'total_trades': total_trades,
@@ -496,7 +462,7 @@ class RiskAnalyzer:
         severity = "LOW"
         
         # Get metrics
-        total_return = self.tracker.get_return_pct()
+        total_return = self.performance.get('total_return_pct', 0) if self.performance else 0
         dd_analysis = self.get_max_drawdown_analysis()
         max_dd = dd_analysis.get('max_drawdown_pct', 0)
         trade_metrics = self.get_trade_metrics()
@@ -581,14 +547,15 @@ class RiskAnalyzer:
             severity = "CRITICAL"
         
         # Check 6: Underperforming benchmark
-        if self.spy_tracker:
-            spy_return = self.spy_tracker.get_return_pct()
-            if total_return < spy_return:
+        benchmark_perf = self.reader.get_strategy_performance(self.benchmark)
+        if benchmark_perf:
+            bench_return = benchmark_perf.get('total_return_pct', 0)
+            if total_return < bench_return:
                 warnings.append({
                     'type': 'UNDERPERFORMING_BENCHMARK',
                     'severity': 'HIGH',
-                    'message': f'⚠️ Underperforming S&P 500: {total_return:.1f}% vs {spy_return:.1f}%',
-                    'explanation': 'Strategy returns worse than buying and holding SPY',
+                    'message': f'⚠️ Underperforming {self.benchmark}: {total_return:.1f}% vs {bench_return:.1f}%',
+                    'explanation': f'Strategy returns worse than buying and holding {self.benchmark}',
                     'recommendation': 'Consider if complexity and risk are justified'
                 })
                 if severity in ["LOW", "MEDIUM"]:
@@ -643,20 +610,15 @@ class RiskAnalyzer:
     # ============================================================
     
     def generate_report(self):
-        """
-        Generate comprehensive risk analysis report
-        
-        Returns:
-            dict: Complete risk metrics and analysis
-        """
+        """Generate comprehensive risk analysis report"""
         dd_analysis = self.get_max_drawdown_analysis()
         trade_metrics = self.get_trade_metrics()
         risk_assessment = self.assess_risk_level()
         
         report = {
             # Basic metrics
-            'total_return_pct': self.tracker.get_return_pct(),
-            'total_profit_dollars': self.tracker.get_profit_dollars(),
+            'total_return_pct': self.performance.get('total_return_pct', 0) if self.performance else 0,
+            'total_profit_dollars': self.performance.get('total_profit_dollars', 0) if self.performance else 0,
             
             # Volatility metrics
             'volatility_annual_pct': self.get_volatility(annualize=True),
@@ -694,7 +656,7 @@ class RiskAnalyzer:
         report = self.generate_report()
         
         print("\n" + "="*70)
-        print("COMPREHENSIVE RISK ANALYSIS REPORT")
+        print(f"COMPREHENSIVE RISK ANALYSIS: {self.strategy_name}")
         print("="*70)
         
         # Risk Assessment
@@ -747,3 +709,19 @@ class RiskAnalyzer:
             print(f"   Expectancy: ${trade_metrics['expectancy_dollars']:+,.0f}")
         
         print("\n" + "="*70 + "\n")
+
+
+# ============================================================
+# CONVENIENCE FUNCTIONS
+# ============================================================
+
+def analyze_strategy_risk(reader, strategy_name, benchmark='SPY'):
+    """
+    Convenience function to analyze strategy risk
+    
+    Usage:
+        analyzer = analyze_strategy_risk(reader, 'My Strategy')
+        analyzer.print_report()
+    """
+    analyzer = RiskAnalyzerDB(reader, strategy_name, benchmark)
+    return analyzer
