@@ -1,6 +1,7 @@
 """
-Example Momentum Strategy using pre-computed indicators
-Updated for parallel processing compatibility
+Momentum Strategy - REFACTORED FOR OPTIMIZATION
+Golden Cross / Death Cross with RSI filter
+Uses pre-computed indicators for maximum performance
 """
 
 import pandas as pd
@@ -8,6 +9,13 @@ import numpy as np
 from strategy_base import StrategyBase, StrategyConfig
 
 class Strategy(StrategyBase):
+    """
+    Momentum strategy using moving average crossovers
+    
+    BUY: Fast MA crosses above Slow MA, RSI < 70
+    SELL: Fast MA crosses below Slow MA, RSI > 30
+    """
+    
     def __init__(self, config: StrategyConfig = None):
         """Initialize with configuration"""
         if config is None:
@@ -21,17 +29,17 @@ class Strategy(StrategyBase):
         
         super().__init__(config)
         
-        # Strategy parameters
-        self.fast_ma = 20
-        self.slow_ma = 50
+        # Strategy parameters (configurable)
+        self.fast_period = 20
+        self.slow_period = 50
         self.rsi_period = 14
-        self.rsi_oversold = 30
         self.rsi_overbought = 70
+        self.rsi_oversold = 30
         
-        # Declare required indicators (will be pre-computed)
+        # Declare required indicators (pre-computed)
         self.required_indicators = [
-            f'sma_{self.fast_ma}',
-            f'sma_{self.slow_ma}',
+            f'sma_{self.fast_period}',
+            f'sma_{self.slow_period}',
             f'rsi_{self.rsi_period}'
         ]
     
@@ -41,83 +49,72 @@ class Strategy(StrategyBase):
         
         Args:
             symbol: Stock symbol
-            data: Historical data up to current bar (includes pre-computed indicators!)
+            data: Historical data up to current bar (includes pre-computed indicators)
             spy_data: SPY data (optional)
-            bar_index: Current bar index (0-based)
+            bar_index: Current bar index
             
         Returns:
             'BUY', 'SELL', or 'HOLD'
         """
-        # Need minimum bars
-        if len(data) < self.slow_ma + 1:
+        # Need at least slow_period + 1 bars
+        if len(data) < self.slow_period + 1:
             return 'HOLD'
         
-        # Current and previous indices (relative to current bar)
-        current_idx = -1  # Current bar is always last in historical data
-        prev_idx = -2 if len(data) >= 2 else -1  # Previous bar
+        # Column names for indicators
+        fast_ma_col = f'sma_{self.fast_period}'
+        slow_ma_col = f'sma_{self.slow_period}'
+        rsi_col = f'rsi_{self.rsi_period}'
         
         try:
-            # Access pre-computed indicators (FAST - no calculation!)
-            fast_ma_col = f'sma_{self.fast_ma}'
-            slow_ma_col = f'sma_{self.slow_ma}'
-            rsi_col = f'rsi_{self.rsi_period}'
+            # Current bar (last in historical data)
+            fast_ma_now = data[fast_ma_col].iloc[-1]
+            slow_ma_now = data[slow_ma_col].iloc[-1]
+            rsi_now = data[rsi_col].iloc[-1]
             
-            if fast_ma_col not in data.columns or slow_ma_col not in data.columns or rsi_col not in data.columns:
+            # Previous bar (for crossover detection)
+            fast_ma_prev = data[fast_ma_col].iloc[-2]
+            slow_ma_prev = data[slow_ma_col].iloc[-2]
+            
+            # Check for NaN
+            if pd.isna(fast_ma_now) or pd.isna(slow_ma_now) or pd.isna(rsi_now):
+                return 'HOLD'
+            if pd.isna(fast_ma_prev) or pd.isna(slow_ma_prev):
                 return 'HOLD'
             
-            fast_ma_current = data[fast_ma_col].iloc[current_idx]
-            fast_ma_prev = data[fast_ma_col].iloc[prev_idx] if prev_idx >= -len(data) else None
-            
-            slow_ma_current = data[slow_ma_col].iloc[current_idx]
-            slow_ma_prev = data[slow_ma_col].iloc[prev_idx] if prev_idx >= -len(data) else None
-            
-            rsi_current = data[rsi_col].iloc[current_idx]
-            
-            # Check for NaN (shouldn't happen with pre-computation)
-            if (pd.isna(fast_ma_current) or pd.isna(slow_ma_current) or 
-                pd.isna(rsi_current)):
-                return 'HOLD'
-            
-            # Need previous values for crossover detection
-            if fast_ma_prev is None or slow_ma_prev is None:
-                return 'HOLD'
-            
-            # --- BUY SIGNAL ---
-            # Golden Cross: Fast MA crosses above Slow MA
-            # And RSI is not overbought
-            if (fast_ma_prev <= slow_ma_prev and  # Was below or equal
-                fast_ma_current > slow_ma_current and  # Now above
-                rsi_current < self.rsi_overbought):  # Not overbought
-                return 'BUY'
-            
-            # --- SELL SIGNAL ---
-            # Death Cross: Fast MA crosses below Slow MA
-            # And RSI is not oversold (optional filter)
-            elif (fast_ma_prev >= slow_ma_prev and  # Was above or equal
-                  fast_ma_current < slow_ma_current and  # Now below
-                  rsi_current > self.rsi_oversold):  # Not oversold
-                return 'SELL'
-            
-        except KeyError as e:
-            # This shouldn't happen if indicators are properly pre-computed
-            # But we handle it gracefully
-            print(f"⚠️  {self.name}: Missing indicator {e}")
-            return 'HOLD'
-        except Exception as e:
-            print(f"⚠️  {self.name}: Error in signal generation: {e}")
+        except (KeyError, IndexError):
+            # Indicator columns don't exist or not enough data
             return 'HOLD'
         
-        # Default: hold position
+        # ===================================
+        # BUY SIGNAL: Golden Cross
+        # ===================================
+        # Fast MA crosses ABOVE Slow MA
+        # AND RSI is not overbought
+        if (fast_ma_prev <= slow_ma_prev and 
+            fast_ma_now > slow_ma_now and
+            rsi_now < self.rsi_overbought):
+            return 'BUY'
+        
+        # ===================================
+        # SELL SIGNAL: Death Cross
+        # ===================================
+        # Fast MA crosses BELOW Slow MA
+        # AND RSI is not oversold
+        elif (fast_ma_prev >= slow_ma_prev and 
+              fast_ma_now < slow_ma_now and
+              rsi_now > self.rsi_oversold):
+            return 'SELL'
+        
         return 'HOLD'
     
     def get_config(self):
-        """Get serializable configuration"""
+        """Return serializable configuration"""
         base_config = super().get_config()
         base_config.update({
-            'fast_ma': self.fast_ma,
-            'slow_ma': self.slow_ma,
+            'fast_period': self.fast_period,
+            'slow_period': self.slow_period,
             'rsi_period': self.rsi_period,
-            'rsi_oversold': self.rsi_oversold,
-            'rsi_overbought': self.rsi_overbought
+            'rsi_overbought': self.rsi_overbought,
+            'rsi_oversold': self.rsi_oversold
         })
         return base_config

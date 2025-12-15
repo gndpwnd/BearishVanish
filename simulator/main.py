@@ -86,14 +86,15 @@ def load_strategies(indicator_library=None):
             
             filename_name = strategy_file.stem.replace('strategy_', '').replace('_', ' ').title()
             
-            # Create config
+            # Create config with QUIET mode for parallel processing
             from strategy_base import StrategyConfig
             config = StrategyConfig(
                 name=filename_name,
                 color=strategy_colors[idx % len(strategy_colors)],
                 initial_capital=100000,
                 position_size_pct=0.10,
-                max_positions=10
+                max_positions=10,
+                verbose=False  # QUIET MODE FOR PARALLEL
             )
             
             # Create instance
@@ -300,13 +301,9 @@ def main():
             print(f"   Run: python main.py --update-universe {args.universe}")
             sys.exit(1)
         
-        # Limit symbols for reasonable runtime
-        max_symbols = 100
-        if len(symbols) > max_symbols:
-            print(f"⚠️  Limiting to {max_symbols} symbols (from {len(symbols)})")
-            symbols = symbols[:max_symbols]
-        
-        print(f"✅ Loaded {len(symbols)} symbols\n")
+        # REMOVED SYMBOL LIMIT - NO ARTIFICIAL LIMITS
+        print(f"✅ Loaded {len(symbols)} symbols from {args.universe.upper()}\n")
+        # No artificial limits - let user control via universe selection
     else:
         symbols = ['AAPL', 'GOOGL', 'TSLA', 'MSFT', 'NVDA', 'META']
         print(f"\n📋 Using default symbols: {symbols}\n")
@@ -331,6 +328,9 @@ def main():
             print(f"   Consider running optimization: python main.py --optimize")
             sys.exit(1)
     
+    # Calculate simulation size (for info only)
+    total_simulations = len(strategies) * len(symbols)
+    
     # Run full simulation with error handling
     print(f"\n{'='*70}")
     print("STARTING OPTIMIZED SIMULATION")
@@ -344,20 +344,24 @@ def main():
     print(f"\n📊 Simulation details:")
     print(f"   Strategies: {len(strategies)}")
     print(f"   Symbols: {len(symbols)}")
+    print(f"   Total simulations: {total_simulations}")
     print(f"   Universe: {args.universe or 'custom'}")
     print(f"   Force Liquidate: {args.force_liquidate}")
     print(f"   Expected speedup: 5-15x vs unoptimized")
-    print(f"\n⏱️  Estimated time: {len(strategies) * len(symbols) * 0.1:.1f}s")
+    
+    # Better time estimation
+    estimated_time = total_simulations * 0.1  # 0.1s per simulation
+    if estimated_time > 60:
+        print(f"\n⏱️  Estimated time: {estimated_time/60:.1f} minutes")
+    else:
+        print(f"\n⏱️  Estimated time: {estimated_time:.1f} seconds")
+    
     print(f"{'='*70}\n")
     
-    # Confirm large simulations
+    # REMOVED CONFIRMATION PROMPT - USER KNOWS WHAT THEY'RE DOING
+    # Calculate simulation size
     total_simulations = len(strategies) * len(symbols)
-    if total_simulations > 100:
-        print(f"⚠️  Large simulation: {total_simulations} strategy-symbol combinations")
-        confirm = input("Proceed? (yes/no): ")
-        if confirm.lower() != 'yes':
-            print("Simulation cancelled")
-            sys.exit(0)
+    # No confirmation needed - user knows what they're doing
     
     # Add error handling for simulation
     try:

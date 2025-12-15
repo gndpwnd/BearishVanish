@@ -1,118 +1,147 @@
 """
-500 Intersection Strategy - PURE LOGIC VERSION
-Buy when slope reverses UP after crossing BELOW S&P 500
-Sell when slope reverses DOWN after crossing ABOVE S&P 500
+500 Intersection Strategy - REFACTORED FOR OPTIMIZATION
+Detects crossovers between stock and S&P 500, then waits for slope reversals
 
-NO artificial exits - strategy holds until natural exit signal
+BUY: Stock crosses BELOW S&P 500, then slope reverses from negative to positive
+SELL: Stock crosses ABOVE S&P 500, then slope reverses from positive to negative
+
+Uses pre-computed indicators for performance
 """
 
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent))
-
-from strategy_base import StrategyBase
+import pandas as pd
 import numpy as np
+from strategy_base import StrategyBase, StrategyConfig
 
 class Strategy(StrategyBase):
-    def __init__(self, color="blue", initial_capital=100000, 
-                 position_size_pct=0.10, max_positions=10):
-        super().__init__(
-            name="500 Intersection", 
-            color=color,
-            initial_capital=initial_capital,
-            position_size_pct=position_size_pct,
-            max_positions=max_positions
-        )
-        
-    def reset(self):
-        super().reset()
-        self.last_cross_index = {}      # When last crossover occurred
-        self.last_cross_was_below = {}  # True if last cross was stock going below S&P
+    """
+    S&P 500 Intersection strategy with slope reversal detection
+    """
     
-    def detect_cross(self, stock_cum, sp500_cum):
-        """Check if a crossover occurred at the last index"""
-        if len(stock_cum) < 2:
-            return False
+    def __init__(self, config: StrategyConfig = None):
+        """Initialize with configuration"""
+        if config is None:
+            config = StrategyConfig(
+                name="500 Intersection",
+                color="#FF6B6B",
+                initial_capital=100000,
+                position_size_pct=0.10,
+                max_positions=10
+            )
         
-        prev_diff = stock_cum.iloc[-2] - sp500_cum.iloc[-2]
-        curr_diff = stock_cum.iloc[-1] - sp500_cum.iloc[-1]
+        super().__init__(config)
         
-        # Cross occurs when signs change (positive to negative or vice versa)
-        return prev_diff * curr_diff < 0
+        # Strategy parameters
+        self.min_bars_after_cross = 1  # Minimum bars after crossover before signal
+        
+        # This strategy uses cumulative returns and slope calculations
+        # We don't pre-compute these as they're simple operations
+        self.required_indicators = []
+        
+        # State tracking (per symbol)
+        # Note: This is OK because we're tracking historical events
+        self._last_cross_index = {}
+        self._last_cross_was_below = {}
     
-    def on_data(self, stock_data, spy_data, current_date, symbol):
-        if len(stock_data) < 3:
-            return None
+    def generate_signal(self, symbol, data, spy_data, bar_index):
+        """
+        Generate signal based on crossover and slope reversal
+        
+        Args:
+            symbol: Stock symbol
+            data: Historical stock data up to current bar
+            spy_data: Historical SPY data up to current bar
+            bar_index: Current bar index
+            
+        Returns:
+            'BUY', 'SELL', or 'HOLD'
+        """
+        # Need minimum data
+        if len(data) < 3 or spy_data is None or len(spy_data) < 3:
+            return 'HOLD'
         
         # Initialize tracking for this symbol
-        if symbol not in self.last_cross_index:
-            self.last_cross_index[symbol] = -1
-            self.last_cross_was_below[symbol] = None
+        if symbol not in self._last_cross_index:
+            self._last_cross_index[symbol] = -1
+            self._last_cross_was_below[symbol] = None
         
-        # Calculate cumulative returns
-        stock_returns = stock_data['close'].pct_change().fillna(0)
-        sp500_returns = spy_data['close'].pct_change().fillna(0)
-        
-        stock_cum = np.cumsum(stock_returns) * 100
-        sp500_cum = np.cumsum(sp500_returns) * 100
-        
-        # Calculate slope (first derivative of cumulative returns)
-        stock_slope = np.gradient(stock_cum)
-        
-        current_idx = len(stock_cum) - 1
-        
-        # Detect and record crossover
-        if self.detect_cross(stock_cum, sp500_cum):
-            self.last_cross_index[symbol] = current_idx
-            self.last_cross_was_below[symbol] = stock_cum.iloc[-1] < sp500_cum.iloc[-1]
-        
-        # Need at least 2 slope values to detect reversal
-        if current_idx < 2:
-            return None
-        
-        prev_slope = stock_slope[-2]
-        curr_slope = stock_slope[-1]
-        
-        # Current position relative to S&P
-        currently_below_sp500 = stock_cum.iloc[-1] < sp500_cum.iloc[-1]
-        
-        # ==============================================================
-        # SELL LOGIC: Stock crossed ABOVE S&P, slope reverses from + to -
-        # ==============================================================
-        if self.last_executed_signal.get(symbol) == 'BUY':
-            # Conditions:
-            # 1. Had a previous crossover
-            # 2. Last cross was going ABOVE (not below)
-            # 3. Previous slope was positive
-            # 4. Current slope turns negative
-            # 5. Still above S&P 500 (can't sell while below)
+        try:
+            # Calculate cumulative returns (simple, fast operation)
+            stock_returns = data['close'].pct_change().fillna(0)
+            spy_returns = spy_data['close'].pct_change().fillna(0)
             
-            if (self.last_cross_index[symbol] != -1 and
-                not self.last_cross_was_below[symbol] and  # Crossed above
-                prev_slope > 0 and 
-                curr_slope < 0 and
-                not currently_below_sp500 and  # Must be above to sell
-                self.can_generate_signal('SELL', symbol)):
+            # Ensure same length
+            min_len = min(len(stock_returns), len(spy_returns))
+            stock_returns = stock_returns.iloc[-min_len:]
+            spy_returns = spy_returns.iloc[-min_len:]
+            
+            stock_cum = (stock_returns.cumsum() * 100).values
+            spy_cum = (spy_returns.cumsum() * 100).values
+            
+            # Calculate slope (gradient of cumulative returns)
+            stock_slope = np.gradient(stock_cum)
+            
+            # Current position in arrays
+            current_idx = len(stock_cum) - 1
+            
+            # Need at least 2 points for slope comparison
+            if current_idx < 2:
+                return 'HOLD'
+            
+            # ===================================
+            # DETECT CROSSOVER
+            # ===================================
+            # Check if crossover occurred at current bar
+            if current_idx >= 1:
+                prev_diff = stock_cum[current_idx - 1] - spy_cum[current_idx - 1]
+                curr_diff = stock_cum[current_idx] - spy_cum[current_idx]
                 
-                return self.emit_signal('SELL', symbol)
-        
-        # ==============================================================
-        # BUY LOGIC: Stock crossed BELOW S&P, slope reverses from - to +
-        # ==============================================================
-        # Conditions:
-        # 1. Had a previous crossover
-        # 2. Last cross was going BELOW (not above)
-        # 3. Previous slope was negative
-        # 4. Current slope turns positive
-        # 5. Still below S&P 500 (can't buy while above)
-        
-        if (self.last_cross_index[symbol] != -1 and
-            self.last_cross_was_below[symbol] and  # Crossed below
-            prev_slope < 0 and 
-            curr_slope > 0 and
-            currently_below_sp500 and  # Must be below to buy
-            self.can_generate_signal('BUY', symbol)):
+                # Crossover: signs change
+                if prev_diff * curr_diff < 0:
+                    self._last_cross_index[symbol] = current_idx
+                    self._last_cross_was_below[symbol] = (curr_diff < 0)
             
-            return self.emit_signal('BUY', symbol)
+            # Check if we've had a crossover
+            if self._last_cross_index[symbol] == -1:
+                return 'HOLD'
+            
+            # Get slope values
+            prev_slope = stock_slope[current_idx - 1]
+            curr_slope = stock_slope[current_idx]
+            
+            # Current position relative to S&P
+            currently_below_sp500 = (stock_cum[current_idx] < spy_cum[current_idx])
+            
+            # ===================================
+            # BUY SIGNAL
+            # ===================================
+            # Stock crossed BELOW S&P, slope reverses from - to +
+            if (self._last_cross_was_below[symbol] and
+                prev_slope < 0 and 
+                curr_slope > 0 and
+                currently_below_sp500):  # Must still be below
+                return 'BUY'
+            
+            # ===================================
+            # SELL SIGNAL
+            # ===================================
+            # Stock crossed ABOVE S&P, slope reverses from + to -
+            elif (self._last_cross_was_below[symbol] is not None and
+                  not self._last_cross_was_below[symbol] and
+                  prev_slope > 0 and 
+                  curr_slope < 0 and
+                  not currently_below_sp500):  # Must still be above
+                return 'SELL'
+            
+        except Exception as e:
+            # Handle any calculation errors gracefully
+            return 'HOLD'
         
-        return None
+        return 'HOLD'
+    
+    def get_config(self):
+        """Return serializable configuration"""
+        base_config = super().get_config()
+        base_config.update({
+            'min_bars_after_cross': self.min_bars_after_cross
+        })
+        return base_config
