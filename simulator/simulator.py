@@ -15,6 +15,7 @@ from pathlib import Path
 import json
 import importlib.util
 import sys
+import sqlite3
 
 from strategy_tracker import StrategyTracker
 from simulation_telemetry import SimulationTelemetry, BatchBuffer
@@ -693,37 +694,13 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                             strategy_performances[strategy_name] = {
                                 'config': result.get('strategy_config', {}),
                                 'symbols': [],
-                                'initial_cash': result.get('initial_cash', 0),
-                                'final_cash': 0,
-                                'portfolio_value_history': [],
                                 'rejected_trades': 0,
-                                'trades_summary': {
-                                    'total_trades': 0,
-                                    'buy_trades': 0,
-                                    'sell_trades': 0,
-                                    'winning_trades': 0,
-                                    'losing_trades': 0
-                                }
                             }
                         
                         # Update performance data
                         perf = strategy_performances[strategy_name]
                         perf['symbols'].append(symbol)
-                        perf['final_cash'] += result.get('final_cash', 0)
-                        
-                        # Aggregate portfolio value history (use last value for now)
-                        if result.get('portfolio_value_history'):
-                            perf['portfolio_value_history'].append(result['portfolio_value_history'][-1])
-                        
                         perf['rejected_trades'] += result.get('rejected_trades', 0)
-                        
-                        # Update trades summary
-                        trades_summary = result.get('trades_summary', {})
-                        perf['trades_summary']['total_trades'] += trades_summary.get('total_trades', 0)
-                        perf['trades_summary']['buy_trades'] += trades_summary.get('buy_trades', 0)
-                        perf['trades_summary']['sell_trades'] += trades_summary.get('sell_trades', 0)
-                        perf['trades_summary']['winning_trades'] += trades_summary.get('winning_trades', 0)
-                        perf['trades_summary']['losing_trades'] += trades_summary.get('losing_trades', 0)
                         
                         # COLLECT ALL TELEMETRY DATA
                         all_trade_attempts.extend(result.get('trade_attempts', []))
@@ -744,77 +721,85 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     # STEP 6: WRITE ALL COLLECTED DATA TO DATABASE
     print(f"\n💾 Recording telemetry data...")
     
+    # DEBUG: Check what data we collected
+    print(f"  📊 Collected data counts:")
+    print(f"    Trade attempts: {len(all_trade_attempts):,}")
+    print(f"    Trade entries: {len(all_trade_entries):,}")
+    print(f"    Trade exits: {len(all_trade_exits):,}")
+    print(f"    Portfolio snapshots: {len(all_portfolio_snapshots):,}")
+    
     # Write trade attempts
     if all_trade_attempts:
         print(f"  📝 Writing {len(all_trade_attempts)} trade attempts...")
-        telemetry.batch_insert_trade_attempts(all_trade_attempts)
+        try:
+            telemetry.batch_insert_trade_attempts(all_trade_attempts)
+            print(f"    ✅ Trade attempts written successfully")
+        except Exception as e:
+            print(f"    ❌ Error writing trade attempts: {e}")
 
     # Write trade entries
     if all_trade_entries:
         print(f"  📈 Writing {len(all_trade_entries)} trade entries...")
-        telemetry.batch_insert_trade_entries(all_trade_entries)
+        try:
+            telemetry.batch_insert_trade_entries(all_trade_entries)
+            print(f"    ✅ Trade entries written successfully")
+        except Exception as e:
+            print(f"    ❌ Error writing trade entries: {e}")
     
     # Write trade exits
     if all_trade_exits:
         print(f"  📉 Writing {len(all_trade_exits)} trade exits...")
-        telemetry.batch_update_trade_exits(all_trade_exits)
+        try:
+            telemetry.batch_update_trade_exits(all_trade_exits)
+            print(f"    ✅ Trade exits written successfully")
+        except Exception as e:
+            print(f"    ❌ Error writing trade exits: {e}")
     
     # Write portfolio snapshots
     if all_portfolio_snapshots:
         print(f"  📊 Writing {len(all_portfolio_snapshots)} portfolio snapshots...")
-        telemetry.batch_insert_portfolio_snapshots(all_portfolio_snapshots)
+        try:
+            telemetry.batch_insert_portfolio_snapshots(all_portfolio_snapshots)
+            print(f"    ✅ Portfolio snapshots written successfully")
+        except Exception as e:
+            print(f"    ❌ Error writing portfolio snapshots: {e}")
     
-    # STEP 7: Create and finalize strategy performance records
+    # STEP 7: Finalize strategy performance (database version)
     print(f"\n📊 Finalizing strategy performance...")
     
-    # Calculate SPY returns for alpha/beta
-    spy_returns = None
-    if spy_data is not None and 'close' in spy_data.columns:
-        spy_returns = spy_data['close'].pct_change().dropna()
+    # Store strategy configurations
+    for strategy in strategies:
+        strategy_config = strategy.get_config()
+        
+        # Store config in database
+        conn = sqlite3.connect(telemetry.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO strategy_configs
+            (strategy_name, initial_capital, position_size_pct, max_positions, 
+            color, parameters_json, created_timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            strategy.name,
+            strategy.initial_capital,
+            strategy.position_size_pct,
+            strategy.max_positions,
+            strategy.color,
+            json.dumps(strategy_config),
+            int(time.time())
+        ))
+        
+        conn.commit()
+        conn.close()
     
-    for strategy_name, perf_data in strategy_performances.items():
-        if perf_data['symbols']:
-            # Create a simple tracker with serializable data only
-            from strategy_tracker import StrategyTracker
-            
-            # Create tracker with just the data we have
-            tracker = StrategyTracker(
-                strategy_name,
-                initial_cash=perf_data['initial_cash'],
-                position_size_pct=perf_data['config'].get('position_size_pct', 0.10),
-                max_positions=perf_data['config'].get('max_positions', 10),
-                verbose=False
-            )
-            
-            # Update tracker with our aggregated data
-            tracker.cash = perf_data.get('final_cash', perf_data['initial_cash'])
-            
-            # Set portfolio value history if we have it
-            if perf_data['portfolio_value_history']:
-                # Use average as approximation (since we can't reconstruct full history)
-                avg_value = np.mean(perf_data['portfolio_value_history'])
-                tracker.portfolio_value_history = [avg_value]
-                tracker.dates = [pd.Timestamp.now()]  # Approximate
-            
-            # Store config for telemetry
-            tracker.strategy_config = perf_data['config']
-            
-            # Finalize strategy in telemetry
-            telemetry.finalize_strategy(
-                strategy_name=strategy_name,
-                tracker=tracker,
-                spy_returns=spy_returns,
-                rejected_count=perf_data.get('rejected_trades', 0)
-            )
-            
-            trades_summary = perf_data['trades_summary']
-            total_trades = trades_summary.get('total_trades', 0)
-            completed_trades = trades_summary.get('sell_trades', 0)  # Rough approximation
-            
-            print(f"  ✅ {strategy_name}: {len(perf_data['symbols'])} symbols, "
-                  f"{trades_summary.get('winning_trades', 0)} wins, "
-                  f"{trades_summary.get('losing_trades', 0)} losses, "
-                  f"{perf_data.get('rejected_trades', 0)} rejected trades")
+    # Finalize each strategy using database queries
+    for strategy_name in strategy_performances.keys():
+        telemetry.finalize_strategy(
+            strategy_name=strategy_name,
+            rejected_count=strategy_performances[strategy_name].get('rejected_trades', 0)
+        )
+        print(f"  ✅ {strategy_name}: Finalized with database queries")
     
     # Record simulation end
     telemetry.record_simulation_end()
@@ -847,6 +832,25 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         estimated_baseline_time = total_sims * 0.5  # Estimated 0.5s per task baseline
         speedup = estimated_baseline_time / simulation_time
         print(f"🎯 Estimated speedup: {speedup:.1f}x")
+    
+    # Quick verification
+    try:
+        conn = sqlite3.connect(telemetry.db_path)
+        cursor = conn.cursor()
+        
+        print(f"\n📊 QUICK VERIFICATION:")
+        cursor.execute("SELECT COUNT(*) FROM trade_history")
+        trade_count = cursor.fetchone()[0]
+        print(f"   Trade history rows: {trade_count:,}")
+        
+        cursor.execute("SELECT strategy_name, total_trades FROM strategy_performance")
+        strategies_check = cursor.fetchall()
+        for strat_name, total_trades in strategies_check:
+            print(f"   {strat_name}: {total_trades} trades in performance table")
+        
+        conn.close()
+    except Exception as e:
+        print(f"   ⚠️  Verification failed: {e}")
     
     print(f"{'='*70}\n")
     

@@ -457,119 +457,271 @@ class SimulationTelemetry:
         conn.commit()
         conn.close()
 
-    def finalize_strategy(self, strategy_name, tracker, spy_returns=None, rejected_count=0):
-        """Calculate and store final metrics with strategy configuration"""
+    def finalize_strategy(self, strategy_name, tracker=None, spy_returns=None, rejected_count=0):
+        """Calculate and store final metrics - DATABASE ONLY VERSION with DEBUGGING"""
+        import numpy as np
+        import json
+        import sqlite3
+        import time
+        
+        print(f"  📊 Finalizing {strategy_name}...")
+        print(f"    Using database: {self.db_path}")
+        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Get strategy configuration from tracker
-        strategy_config = tracker.strategy_config if hasattr(tracker, 'strategy_config') else {}
-        
-        # Extract configuration values
-        position_size_pct = strategy_config.get('position_size_pct', 0.10)
-        max_positions = strategy_config.get('max_positions', 10)
-        
-        # Get all parameters from strategy instance if available
-        full_config = {}
-        if hasattr(tracker, 'strategy_instance'):
-            strategy_instance = tracker.strategy_instance
-            if hasattr(strategy_instance, 'get_config'):
-                full_config = strategy_instance.get_config()
-            else:
-                # Extract basic parameters
-                full_config = {
-                    'name': getattr(strategy_instance, 'name', strategy_name),
-                    'initial_capital': getattr(strategy_instance, 'initial_capital', tracker.initial_cash),
-                    'position_size_pct': getattr(strategy_instance, 'position_size_pct', position_size_pct),
-                    'max_positions': getattr(strategy_instance, 'max_positions', max_positions),
-                    'color': getattr(strategy_instance, 'color', 'blue'),
-                }
-        
-        # Get completed trades for win rate
+        # ========================================================
+        # 1. GET ALL TRADE STATS FROM DATABASE - WITH DEBUG
+        # ========================================================
         cursor.execute('''
-            SELECT profit_loss_dollars FROM trade_history
-            WHERE strategy_name = ? AND trade_status = 'CLOSED'
+            SELECT 
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN trade_status = 'CLOSED' THEN 1 ELSE 0 END) as completed_trades,
+                SUM(CASE WHEN trade_status = 'OPEN' THEN 1 ELSE 0 END) as open_positions,
+                SUM(CASE WHEN trade_status = 'CLOSED' AND profit_loss_dollars > 0 THEN 1 ELSE 0 END) as winning_trades,
+                SUM(CASE WHEN trade_status = 'CLOSED' AND profit_loss_dollars < 0 THEN 1 ELSE 0 END) as losing_trades,
+                SUM(CASE WHEN trade_status = 'CLOSED' AND profit_loss_dollars > 0 THEN profit_loss_dollars ELSE 0 END) as gross_profit,
+                ABS(SUM(CASE WHEN trade_status = 'CLOSED' AND profit_loss_dollars < 0 THEN profit_loss_dollars ELSE 0 END)) as gross_loss,
+                AVG(CASE WHEN trade_status = 'CLOSED' AND profit_loss_dollars > 0 THEN profit_loss_dollars END) as avg_win,
+                AVG(CASE WHEN trade_status = 'CLOSED' AND profit_loss_dollars < 0 THEN profit_loss_dollars END) as avg_loss,
+                AVG(CASE WHEN trade_status = 'CLOSED' THEN holding_days END) as avg_holding_days
+            FROM trade_history
+            WHERE strategy_name = ?
         ''', (strategy_name,))
         
-        closed_trades = cursor.fetchall()
-        total_trades = len(closed_trades)
-        wins = sum(1 for (pnl,) in closed_trades if pnl > 0)
-        losses = sum(1 for (pnl,) in closed_trades if pnl < 0)
-        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        stats = cursor.fetchone()
         
-        # Get open positions count
+        total_trades = stats[0] or 0
+        completed_trades = stats[1] or 0
+        open_positions = stats[2] or 0
+        winning_trades = stats[3] or 0
+        losing_trades = stats[4] or 0
+        gross_profit = stats[5] or 0
+        gross_loss = stats[6] or 0
+        avg_win = stats[7] or 0
+        avg_loss = stats[8] or 0
+        avg_holding_days = stats[9] or 0
+        
+        # DEBUG: Show trade stats
+        print(f"    Found in database:")
+        print(f"      Total trades: {total_trades:,}")
+        print(f"      Completed trades: {completed_trades:,}")
+        print(f"      Open positions: {open_positions:,}")
+        print(f"      Winning trades: {winning_trades:,}")
+        print(f"      Losing trades: {losing_trades:,}")
+        
+        # Check for trade attempts in database
         cursor.execute('''
-            SELECT COUNT(*) FROM trade_history
-            WHERE strategy_name = ? AND trade_status = 'OPEN'
+            SELECT COUNT(*), SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END)
+            FROM trade_attempts
+            WHERE strategy_name = ?
         ''', (strategy_name,))
-        open_positions = cursor.fetchone()[0]
         
-        # Calculate profit factor
-        gross_profit = sum(pnl for (pnl,) in closed_trades if pnl > 0)
-        gross_loss = abs(sum(pnl for (pnl,) in closed_trades if pnl < 0))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+        attempts_stats = cursor.fetchone()
+        total_attempts = attempts_stats[0] or 0
+        successful_attempts = attempts_stats[1] or 0
         
-        # Also store strategy configuration in separate table
+        print(f"    Trade attempts: {total_attempts:,} (successful: {successful_attempts:,})")
+        
+        # ========================================================
+        # 2. CALCULATE DERIVED METRICS
+        # ========================================================
+        win_rate = (winning_trades / completed_trades * 100) if completed_trades > 0 else 0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
+        risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+        expectancy = (win_rate/100 * avg_win) + ((1 - win_rate/100) * avg_loss)
+        
+        print(f"    Calculated metrics:")
+        print(f"      Win rate: {win_rate:.1f}%")
+        print(f"      Profit factor: {profit_factor:.2f}")
+        
+        # ========================================================
+        # 3. GET PORTFOLIO METRICS FROM DATABASE
+        # ========================================================
         cursor.execute('''
-            INSERT OR REPLACE INTO strategy_configs
-            (strategy_name, initial_capital, position_size_pct, max_positions, 
-            color, parameters_json, created_timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            strategy_name,
-            full_config.get('initial_capital', tracker.initial_cash),
-            full_config.get('position_size_pct', position_size_pct),
-            full_config.get('max_positions', max_positions),
-            full_config.get('color', 'blue'),
-            json.dumps(full_config),
-            int(time.time())
-        ))
+            SELECT 
+                MIN(portfolio_value) as min_value,
+                MAX(portfolio_value) as max_value,
+                portfolio_value as final_value,
+                cash as final_cash
+            FROM portfolio_history
+            WHERE strategy_name = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ''', (strategy_name,))
         
-        # Store performance with configuration
+        portfolio_stats = cursor.fetchone()
+        
+        if portfolio_stats:
+            min_value = portfolio_stats[0] or 0
+            max_value = portfolio_stats[1] or 0
+            final_value = portfolio_stats[2] or 100000
+            final_cash = portfolio_stats[3] or 100000
+        else:
+            min_value = max_value = final_value = final_cash = 100000
+            print(f"    ⚠️  No portfolio history found for {strategy_name}")
+        
+        # Get initial capital from first portfolio snapshot
         cursor.execute('''
-            INSERT OR REPLACE INTO strategy_performance
-            (strategy_name, initial_capital, final_value, total_return_pct,
-            total_profit_dollars, total_trades, completed_trades, open_positions,
-            rejected_trades, win_rate_pct, winning_trades, losing_trades, profit_factor,
-            sharpe_ratio, sortino_ratio, calmar_ratio, max_drawdown_pct,
-            avg_win_dollars, avg_loss_dollars, avg_trade_duration_days,
-            risk_reward_ratio, expectancy_dollars, exposure_time_pct,
-            beta, alpha_pct, information_ratio,
-            position_size_pct, max_positions, strategy_config_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            strategy_name,
-            tracker.initial_cash,
-            tracker.get_final_value(),
-            tracker.get_return_pct(),
-            tracker.get_profit_dollars(),
-            len(tracker.trades),
-            total_trades,
-            open_positions,
-            rejected_count,
-            win_rate,
-            wins,
-            losses,
-            profit_factor,
-            tracker.get_sharpe_ratio(),
-            tracker.get_sortino_ratio(),
-            tracker.get_calmar_ratio(),
-            tracker.get_max_drawdown(),
-            tracker.get_avg_win(),
-            tracker.get_avg_loss(),
-            tracker.get_avg_trade_duration(),
-            abs(tracker.get_avg_win() / tracker.get_avg_loss()) if tracker.get_avg_loss() != 0 else 0,
-            tracker.get_expectancy(),
-            tracker.get_exposure_time(),
-            tracker.get_portfolio_beta(spy_returns) if spy_returns is not None else None,
-            tracker.get_alpha(tracker.get_return_pct()) if spy_returns is not None else None,
-            tracker.get_information_ratio(spy_returns) if spy_returns is not None else None,
-            position_size_pct,
-            max_positions,
-            json.dumps(full_config)
-        ))
+            SELECT portfolio_value
+            FROM portfolio_history
+            WHERE strategy_name = ?
+            ORDER BY timestamp ASC
+            LIMIT 1
+        ''', (strategy_name,))
         
-        conn.commit()
+        initial_result = cursor.fetchone()
+        initial_capital = initial_result[0] if initial_result else 100000
+        
+        # Calculate returns
+        total_return_pct = ((final_value - initial_capital) / initial_capital * 100) if initial_capital > 0 else 0
+        total_profit_dollars = final_value - initial_capital
+        
+        print(f"    Portfolio:")
+        print(f"      Initial: ${initial_capital:,.2f}")
+        print(f"      Final: ${final_value:,.2f}")
+        print(f"      Return: {total_return_pct:.2f}%")
+        
+        # ========================================================
+        # 4. CALCULATE RISK METRICS FROM PORTFOLIO HISTORY
+        # ========================================================
+        cursor.execute('''
+            SELECT daily_return_pct
+            FROM portfolio_history
+            WHERE strategy_name = ? AND daily_return_pct IS NOT NULL
+            ORDER BY timestamp
+        ''', (strategy_name,))
+        
+        returns = [row[0] for row in cursor.fetchall()]
+        sharpe_ratio = 0
+        sortino_ratio = 0
+        
+        if len(returns) > 2:
+            returns_arr = np.array(returns)
+            if returns_arr.std() > 0:
+                sharpe_ratio = (returns_arr.mean() / returns_arr.std()) * np.sqrt(252 * 6.5)
+            
+            downside_returns = returns_arr[returns_arr < 0]
+            if len(downside_returns) > 0 and downside_returns.std() > 0:
+                sortino_ratio = (returns_arr.mean() / downside_returns.std()) * np.sqrt(252 * 6.5)
+        
+        # Calculate max drawdown from portfolio values
+        cursor.execute('''
+            SELECT portfolio_value
+            FROM portfolio_history
+            WHERE strategy_name = ?
+            ORDER BY timestamp
+        ''', (strategy_name,))
+        
+        values = [row[0] for row in cursor.fetchall()]
+        max_drawdown_pct = 0
+        
+        if len(values) > 0:
+            peak = values[0]
+            for value in values:
+                if value > peak:
+                    peak = value
+                dd = (peak - value) / peak * 100
+                if dd > max_drawdown_pct:
+                    max_drawdown_pct = dd
+        
+        # Calculate Calmar ratio
+        calmar_ratio = 0
+        if max_drawdown_pct > 0:
+            annual_return = total_return_pct * 2  # Approximate annual from 6 months
+            calmar_ratio = annual_return / max_drawdown_pct
+        
+        # ========================================================
+        # 5. GET STRATEGY CONFIGURATION
+        # ========================================================
+        cursor.execute('''
+            SELECT position_size_pct, max_positions, parameters_json
+            FROM strategy_configs
+            WHERE strategy_name = ?
+        ''', (strategy_name,))
+        
+        config_row = cursor.fetchone()
+        position_size_pct = config_row[0] if config_row else 0.10
+        max_positions = config_row[1] if config_row else 10
+        strategy_config_json = config_row[2] if config_row else '{}'
+        
+        # Calculate exposure time
+        cursor.execute('''
+            SELECT 
+                COUNT(CASE WHEN num_positions > 0 THEN 1 END) * 100.0 / COUNT(*)
+            FROM portfolio_history
+            WHERE strategy_name = ?
+        ''', (strategy_name,))
+        
+        exposure_result = cursor.fetchone()
+        exposure_time_pct = exposure_result[0] if exposure_result else 0
+        
+        # ========================================================
+        # 6. INSERT PERFORMANCE RECORD (FIXED!)
+        # ========================================================
+        try:
+            cursor.execute('''
+                INSERT OR REPLACE INTO strategy_performance
+                (strategy_name, initial_capital, final_value, total_return_pct,
+                total_profit_dollars, total_trades, completed_trades, open_positions,
+                rejected_trades, win_rate_pct, winning_trades, losing_trades, profit_factor,
+                sharpe_ratio, sortino_ratio, calmar_ratio, max_drawdown_pct,
+                avg_win_dollars, avg_loss_dollars, avg_trade_duration_days,
+                risk_reward_ratio, expectancy_dollars, exposure_time_pct,
+                beta, alpha_pct, information_ratio,
+                position_size_pct, max_positions, strategy_config_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                strategy_name,
+                initial_capital,
+                final_value,
+                total_return_pct,
+                total_profit_dollars,
+                total_trades,  # ✅ Now will be correct!
+                completed_trades,
+                open_positions,
+                rejected_count,
+                win_rate,
+                winning_trades,
+                losing_trades,
+                profit_factor,
+                sharpe_ratio,
+                sortino_ratio,
+                calmar_ratio,
+                max_drawdown_pct,
+                avg_win,
+                avg_loss,
+                avg_holding_days,
+                risk_reward_ratio,
+                expectancy,
+                exposure_time_pct,
+                None,  # beta
+                None,  # alpha
+                None,  # information_ratio
+                position_size_pct,
+                max_positions,
+                strategy_config_json
+            ))
+            
+            conn.commit()
+            print(f"    ✅ Successfully updated strategy_performance")
+            
+            # Verify the update
+            cursor.execute('''
+                SELECT total_trades, total_return_pct 
+                FROM strategy_performance 
+                WHERE strategy_name = ?
+            ''', (strategy_name,))
+            
+            result = cursor.fetchone()
+            if result:
+                print(f"    ✅ Confirmed: total_trades={result[0]}, return={result[1]:.2f}%")
+            
+        except Exception as e:
+            print(f"    ❌ Error updating strategy_performance: {e}")
+            import traceback
+            traceback.print_exc()
+        
         conn.close()
 
     def record_simulation_end(self):
