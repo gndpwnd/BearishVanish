@@ -503,6 +503,9 @@ def run_single_strategy_on_symbol(strategy_name: str,
                             )
                         )
         
+        # Get per-stock performance summary
+        stock_performance = tracker.get_stock_performance_summary()
+        
         # Return ONLY SERIALIZABLE data (no tracker objects)
         return {
             'strategy': strategy.name,
@@ -525,6 +528,7 @@ def run_single_strategy_on_symbol(strategy_name: str,
             'trade_entries': trade_entries,
             'trade_exits': trade_exits,
             'portfolio_snapshots': portfolio_snapshots,
+            'stock_performance': stock_performance,  # Add per-stock metrics
             'success': True
         }
         
@@ -670,6 +674,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     all_trade_entries = []
     all_trade_exits = []
     all_portfolio_snapshots = []
+    all_stock_performance = []  # Collect per-stock performance
     
     # Store strategy performance data (serializable only)
     strategy_performances = {}
@@ -720,6 +725,25 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                         all_trade_entries.extend(result.get('trade_entries', []))
                         all_trade_exits.extend(result.get('trade_exits', []))
                         all_portfolio_snapshots.extend(result.get('portfolio_snapshots', []))
+                        
+                        # COLLECT STOCK PERFORMANCE DATA
+                        stock_perf = result.get('stock_performance', {})
+                        for stock_symbol, metrics in stock_perf.items():
+                            all_stock_performance.append({
+                                'strategy_name': strategy_name,
+                                'symbol': stock_symbol,
+                                'num_trades': metrics.get('num_trades', 0),
+                                'num_buys': metrics.get('num_buys', 0),
+                                'num_sells': metrics.get('num_sells', 0),
+                                'total_invested': metrics.get('total_invested', 0),
+                                'total_returned': metrics.get('total_returned', 0),
+                                'pnl': metrics.get('pnl', 0),
+                                'pnl_pct': metrics.get('pnl_pct', 0),
+                                'win_rate': metrics.get('win_rate', 0),
+                                'wins': metrics.get('wins', 0),
+                                'losses': metrics.get('losses', 0),
+                                'current_shares': metrics.get('current_shares', 0),
+                            })
                     
                 except Exception as e:
                     # Log and display errors
@@ -779,6 +803,46 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
             print(f"    ✅ Portfolio snapshots written successfully")
         except Exception as e:
             print(f"    ❌ Error writing portfolio snapshots: {e}")
+    
+    # Write stock performance (per-symbol metrics)
+    if all_stock_performance:
+        print(f"  📈 Writing {len(all_stock_performance)} stock performance records...")
+        try:
+            conn = sqlite3.connect(telemetry.db_path)
+            conn.text_factory = str
+            cursor = conn.cursor()
+            
+            for perf in all_stock_performance:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO stock_performance
+                    (strategy_name, symbol, num_trades, num_buys, num_sells,
+                     total_invested, total_returned, pnl, pnl_pct, win_rate,
+                     winning_trades, losing_trades, current_shares, created_timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    perf['strategy_name'],
+                    perf['symbol'],
+                    perf['num_trades'],
+                    perf['num_buys'],
+                    perf['num_sells'],
+                    perf['total_invested'],
+                    perf['total_returned'],
+                    perf['pnl'],
+                    perf['pnl_pct'],
+                    perf['win_rate'],
+                    perf['wins'],
+                    perf['losses'],
+                    perf['current_shares'],
+                    int(time.time())
+                ))
+            
+            conn.commit()
+            conn.close()
+            print(f"    ✅ Stock performance written successfully")
+        except Exception as e:
+            print(f"    ❌ Error writing stock performance: {e}")
+            import traceback
+            traceback.print_exc()
     
     # STEP 7: Finalize strategy performance (database version)
     print(f"\n📊 Finalizing strategy performance...")
@@ -842,6 +906,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     print(f"   Trade entries: {len(all_trade_entries):,}")
     print(f"   Trade exits: {len(all_trade_exits):,}")
     print(f"   Portfolio snapshots: {len(all_portfolio_snapshots):,}")
+    print(f"   Stock performance records: {len(all_stock_performance):,}")
     print(f"   Strategies finalized: {len(strategy_performances):,}")
     
     # Print performance improvement estimate

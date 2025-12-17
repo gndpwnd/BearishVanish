@@ -41,6 +41,7 @@ class Strategy(StrategyBase):
         # Note: This is OK because we're tracking historical events
         self._last_cross_index = {}
         self._last_cross_was_below = {}
+        self._last_signal_index = {}  # Track when we last emitted a signal
     
     def generate_signal(self, symbol, data, spy_data, bar_index):
         """
@@ -63,6 +64,7 @@ class Strategy(StrategyBase):
         if symbol not in self._last_cross_index:
             self._last_cross_index[symbol] = -1
             self._last_cross_was_below[symbol] = None
+            self._last_signal_index[symbol] = -1
         
         try:
             # Calculate cumulative returns (simple, fast operation)
@@ -115,22 +117,26 @@ class Strategy(StrategyBase):
             # BUY SIGNAL
             # ===================================
             # Stock crossed BELOW S&P, slope reverses from - to +
+            # But only emit signal once per cross (at the signal index or after)
             if (self._last_cross_was_below[symbol] and
-                prev_slope < 0 and 
-                curr_slope > 0 and
-                currently_below_sp500):  # Must still be below
-                return 'BUY'
+                self._last_signal_index[symbol] < self._last_cross_index[symbol]):  # Haven't signaled yet for this cross
+                
+                if (prev_slope < 0 and curr_slope > 0 and currently_below_sp500):
+                    self._last_signal_index[symbol] = current_idx
+                    return 'BUY'
             
             # ===================================
             # SELL SIGNAL
             # ===================================
             # Stock crossed ABOVE S&P, slope reverses from + to -
+            # But only emit signal once per cross
             elif (self._last_cross_was_below[symbol] is not None and
                   not self._last_cross_was_below[symbol] and
-                  prev_slope > 0 and 
-                  curr_slope < 0 and
-                  not currently_below_sp500):  # Must still be above
-                return 'SELL'
+                  self._last_signal_index[symbol] < self._last_cross_index[symbol]):  # Haven't signaled yet for this cross
+                
+                if (prev_slope > 0 and curr_slope < 0 and not currently_below_sp500):
+                    self._last_signal_index[symbol] = current_idx
+                    return 'SELL'
             
         except Exception as e:
             # Handle any calculation errors gracefully

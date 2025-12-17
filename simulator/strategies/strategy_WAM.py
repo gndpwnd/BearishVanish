@@ -90,18 +90,18 @@ class Strategy(StrategyBase):
             
             # BUY: Dropped 5%+ in past week
             if return_7d <= self.buy_threshold:
-                if self._last_weekly_signal[symbol] != 'BUY':
+                if self._last_weekly_signal[symbol] is None or self._last_weekly_signal[symbol] == 'SELL':
                     self._last_weekly_signal[symbol] = 'BUY'
                     return 'BUY'
             
-            # SELL: Rose 10%+ in past week (if we had bought)
+            # SELL: Rose 10%+ in past week (if we bought on weekly)
             elif return_7d >= self.sell_threshold:
                 if self._last_weekly_signal[symbol] == 'BUY':
                     self._last_weekly_signal[symbol] = 'SELL'
                     return 'SELL'
             
-            # Reset weekly signal if back to neutral
-            elif -0.02 < return_7d < 0.02:  # Within +/-2%
+            # Reset if price recovers to neutral (-2% to +2%)
+            elif -0.02 < return_7d < 0.02:
                 if self._last_weekly_signal[symbol] == 'SELL':
                     self._last_weekly_signal[symbol] = None
             
@@ -111,17 +111,17 @@ class Strategy(StrategyBase):
             
             # BUY: Dropped 5%+ in past month
             if return_30d <= self.buy_threshold:
-                if self._last_monthly_signal[symbol] != 'BUY':
+                if self._last_monthly_signal[symbol] is None or self._last_monthly_signal[symbol] == 'SELL':
                     self._last_monthly_signal[symbol] = 'BUY'
                     return 'BUY'
             
-            # SELL: Rose 10%+ in past month (if we had bought)
+            # SELL: Rose 10%+ in past month (if we bought on monthly)
             elif return_30d >= self.sell_threshold:
                 if self._last_monthly_signal[symbol] == 'BUY':
                     self._last_monthly_signal[symbol] = 'SELL'
                     return 'SELL'
             
-            # Reset monthly signal if back to neutral
+            # Reset if price recovers to neutral
             elif -0.02 < return_30d < 0.02:
                 if self._last_monthly_signal[symbol] == 'SELL':
                     self._last_monthly_signal[symbol] = None
