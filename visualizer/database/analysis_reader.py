@@ -31,6 +31,7 @@ class AnalysisReader:
         
         # Create connection with proper settings
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn.text_factory = str  # FIX: Handle UTF-8 text properly
         self.conn.row_factory = sqlite3.Row
         
         # Load metadata
@@ -129,7 +130,18 @@ class AnalysisReader:
             WHERE strategy_name = ?
             ORDER BY year_month
         """
-        return pd.read_sql_query(query, self.conn, params=(strategy_name,))
+        df = pd.read_sql_query(query, self.conn, params=(strategy_name,))
+        
+        # Handle potential byte encoding issues
+        if not df.empty:
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    # Try to convert bytes to strings
+                    df[col] = df[col].apply(lambda x: 
+                        x.decode('utf-8', errors='replace') if isinstance(x, bytes) else x
+                    )
+        
+        return df
     
     def get_drawdown_periods(self, strategy_name: str, limit: int = 5) -> pd.DataFrame:
         """Get significant drawdown periods"""
@@ -139,7 +151,18 @@ class AnalysisReader:
             ORDER BY drawdown_pct DESC
             LIMIT ?
         """
-        return pd.read_sql_query(query, self.conn, params=(strategy_name, limit))
+        df = pd.read_sql_query(query, self.conn, params=(strategy_name, limit))
+        
+        # Handle potential byte encoding issues
+        if not df.empty:
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    # Try to convert bytes to strings
+                    df[col] = df[col].apply(lambda x: 
+                        x.decode('utf-8', errors='replace') if isinstance(x, bytes) else x
+                    )
+        
+        return df
     
     def get_returns_distribution(self, strategy_name: str) -> pd.DataFrame:
         """Get returns distribution (histogram bins)"""
@@ -155,12 +178,19 @@ class AnalysisReader:
         """
         df = pd.read_sql_query(query, self.conn, params=(strategy_name,))
         
-        # Ensure numeric types
+        # Ensure numeric types and handle encoding
         if not df.empty:
             df['bin_start'] = pd.to_numeric(df['bin_start'], errors='coerce')
             df['bin_end'] = pd.to_numeric(df['bin_end'], errors='coerce')
             df['count'] = pd.to_numeric(df['count'], errors='coerce')
             df['percentage'] = pd.to_numeric(df['percentage'], errors='coerce')
+            
+            # Handle potential byte encoding issues in object columns
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    df[col] = df[col].apply(lambda x: 
+                        x.decode('utf-8', errors='replace') if isinstance(x, bytes) else x
+                    )
         
         return df
     
@@ -171,7 +201,18 @@ class AnalysisReader:
             WHERE strategy_name = ?
             ORDER BY net_profit_loss DESC
         """
-        return pd.read_sql_query(query, self.conn, params=(strategy_name,))
+        df = pd.read_sql_query(query, self.conn, params=(strategy_name,))
+        
+        # Handle potential byte encoding issues
+        if not df.empty:
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    # Try to convert bytes to strings
+                    df[col] = df[col].apply(lambda x: 
+                        x.decode('utf-8', errors='replace') if isinstance(x, bytes) else x
+                    )
+        
+        return df
     
     def get_chart_data(self, strategy_name: str, chart_type: str) -> Optional[Dict[str, Any]]:
         """

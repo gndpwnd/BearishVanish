@@ -14,75 +14,11 @@ from pathlib import Path
 from io import StringIO
 from ticker_validation import TickerValidator
 
+# Import shared UTF-8 utilities
+from utilities.utf8_helpers import ensure_utf8, sanitize_json, get_utf8_connection, clean_ticker
+
 UNIVERSE_DIR = Path('./universes')
 UNIVERSE_DB_PATH = UNIVERSE_DIR / 'stock_universe.db'
-
-# ============================================================
-# UTF-8 SAFETY HELPERS
-# ============================================================
-
-def ensure_utf8_universe(text):
-    """Ensure text is valid UTF-8"""
-    if text is None:
-        return None
-    
-    if isinstance(text, bytes):
-        try:
-            return text.decode('utf-8', errors='replace')
-        except:
-            return text.decode('latin-1', errors='replace')
-    
-    if not isinstance(text, str):
-        text = str(text)
-    
-    try:
-        text.encode('utf-8')
-        return text
-    except UnicodeEncodeError:
-        return text.encode('utf-8', errors='replace').decode('utf-8')
-
-def get_utf8_connection_universe(db_path):
-    """Create SQLite connection with UTF-8 encoding"""
-    conn = sqlite3.connect(db_path)
-    conn.text_factory = str
-    conn.execute("PRAGMA encoding = 'UTF-8'")
-    return conn
-
-def clean_ticker_utf8(ticker):
-    """Clean ticker symbol and ensure UTF-8/ASCII compatibility"""
-    if not ticker:
-        return None
-    
-    # Ensure UTF-8
-    ticker = ensure_utf8_universe(ticker)
-    
-    # Strip whitespace and convert to uppercase
-    ticker = ticker.strip().upper()
-    
-    # Remove any non-ASCII characters (ticker symbols should be ASCII)
-    ticker = ''.join(c for c in ticker if ord(c) < 128)
-    
-    return ticker if ticker else None
-
-def sanitize_json_utf8(data):
-    """Sanitize data before JSON serialization"""
-    if data is None:
-        return None
-    
-    if isinstance(data, dict):
-        sanitized = {
-            ensure_utf8_universe(k): ensure_utf8_universe(v) if isinstance(v, str) else v
-            for k, v in data.items()
-        }
-        return json.dumps(sanitized, ensure_ascii=False)
-    elif isinstance(data, list):
-        sanitized = [
-            ensure_utf8_universe(item) if isinstance(item, str) else item
-            for item in data
-        ]
-        return json.dumps(sanitized, ensure_ascii=False)
-    else:
-        return json.dumps(ensure_utf8_universe(str(data)), ensure_ascii=False)
 
 class UniverseManager:
     def __init__(self, api_key=None, secret_key=None):
@@ -116,7 +52,7 @@ class UniverseManager:
     
     def _init_database(self):
         """Initialize SQLite database with UTF-8 encoding"""
-        conn = get_utf8_connection_universe(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         # Set UTF-8 encoding explicitly
@@ -201,7 +137,7 @@ class UniverseManager:
             
             # Clean tickers with UTF-8 safety
             raw_tickers = df['Symbol'].astype(str).tolist()
-            tickers = [clean_ticker_utf8(t) for t in raw_tickers]
+            tickers = [clean_ticker(t) for t in raw_tickers]
             tickers = [t for t in tickers if t]  # Remove None values
             
             # Additional cleaning from ticker_validation
@@ -241,7 +177,7 @@ class UniverseManager:
             
             # Clean tickers with UTF-8 safety
             raw_tickers = df['Symbol'].astype(str).tolist()
-            tickers = [clean_ticker_utf8(t) for t in raw_tickers]
+            tickers = [clean_ticker(t) for t in raw_tickers]
             tickers = [t for t in tickers if t]
             
             # Additional cleaning
@@ -319,7 +255,7 @@ class UniverseManager:
                             
                             # Clean tickers with UTF-8 safety
                             raw_tickers = df[ticker_col].astype(str).str.strip().tolist()
-                            tickers = [clean_ticker_utf8(t) for t in raw_tickers]
+                            tickers = [clean_ticker(t) for t in raw_tickers]
                             tickers = [t for t in tickers if t]
                             
                             # Only accept if we got a reasonable number
@@ -352,7 +288,7 @@ class UniverseManager:
                     with open(csv_path, 'r', encoding='utf-8', errors='ignore') as f:
                         for i, line in enumerate(f):
                             if i < 15:
-                                print(f"    Line {i}: {ensure_utf8_universe(line[:80].strip())}")
+                                print(f"    Line {i}: {ensure_utf8(line[:80].strip())}")
                 except Exception:
                     pass
                 
@@ -380,7 +316,7 @@ class UniverseManager:
             
             if ticker_col:
                 raw_tickers = df[ticker_col].dropna().astype(str).str.strip().tolist()
-                tickers = [clean_ticker_utf8(t) for t in raw_tickers]
+                tickers = [clean_ticker(t) for t in raw_tickers]
                 tickers = [t for t in tickers if t]
                 print(f"  ✅ Fetched {len(tickers)} Russell 3000 tickers from GitHub")
                 return tickers, df
@@ -414,7 +350,7 @@ class UniverseManager:
         print(f"{'='*70}")
         
         # Clean universe name
-        universe_name = ensure_utf8_universe(universe_name)
+        universe_name = ensure_utf8(universe_name)
         
         # Fetch current tickers
         if universe_name == 'sp500':
@@ -432,7 +368,7 @@ class UniverseManager:
             return
         
         # Ensure all tickers are UTF-8 clean
-        tickers = [clean_ticker_utf8(t) for t in tickers]
+        tickers = [clean_ticker(t) for t in tickers]
         tickers = [t for t in tickers if t]
         
         # Get previous constituents
@@ -443,7 +379,7 @@ class UniverseManager:
         removed = set(previous_tickers) - set(tickers)
         
         current_date = date.today()
-        conn = get_utf8_connection_universe(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         # Mark removed stocks
@@ -453,14 +389,14 @@ class UniverseManager:
             # Only show first 10 removals
             sample_removed = list(removed)[:10]
             for symbol in sample_removed:
-                print(f"  • {ensure_utf8_universe(symbol)} removed")
+                print(f"  • {ensure_utf8(symbol)} removed")
             
             if len(removed) > 10:
                 print(f"  • ... and {len(removed) - 10} more")
             
             # Update all removals in database
             for symbol in removed:
-                symbol_utf8 = ensure_utf8_universe(symbol)
+                symbol_utf8 = ensure_utf8(symbol)
                 cursor.execute('''
                     UPDATE universe_constituents
                     SET date_removed = ?
@@ -482,14 +418,14 @@ class UniverseManager:
             # Only show first 10 additions
             sample_added = list(added)[:10]
             for symbol in sample_added:
-                print(f"  • {ensure_utf8_universe(symbol)} added")
+                print(f"  • {ensure_utf8(symbol)} added")
             
             if len(added) > 10:
                 print(f"  • ... and {len(added) - 10} more")
             
             # Add all to database
             for symbol in added:
-                symbol_utf8 = ensure_utf8_universe(symbol)
+                symbol_utf8 = ensure_utf8(symbol)
                 
                 # First check if this symbol exists but was previously removed
                 cursor.execute('''
@@ -524,8 +460,8 @@ class UniverseManager:
                       symbol_utf8, 'ADDED', 'Added to index'))
         
         # Create daily snapshot with UTF-8 safe JSON
-        tickers_utf8 = [ensure_utf8_universe(t) for t in tickers]
-        tickers_json = sanitize_json_utf8(sorted(tickers_utf8))
+        tickers_utf8 = [ensure_utf8(t) for t in tickers]
+        tickers_json = sanitize_json(sorted(tickers_utf8))
         cursor.execute('''
             INSERT OR REPLACE INTO daily_snapshots
             (date, universe_name, tickers_json, ticker_count)
@@ -567,8 +503,8 @@ class UniverseManager:
     
     def _get_current_constituents(self, universe_name):
         """Get currently active constituents for a universe with UTF-8 safety"""
-        universe_name = ensure_utf8_universe(universe_name)
-        conn = get_utf8_connection_universe(self.db_path)
+        universe_name = ensure_utf8(universe_name)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -578,7 +514,7 @@ class UniverseManager:
         ''', (universe_name,))
         
         rows = cursor.fetchall()
-        tickers = [ensure_utf8_universe(row[0]) for row in rows]
+        tickers = [ensure_utf8(row[0]) for row in rows]
         conn.close()
         
         return tickers
@@ -592,8 +528,8 @@ class UniverseManager:
         if query_date is None:
             query_date = date.today()
         
-        universe_name = ensure_utf8_universe(universe_name)
-        conn = get_utf8_connection_universe(self.db_path)
+        universe_name = ensure_utf8(universe_name)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         # Try to get from daily snapshot first
@@ -609,7 +545,7 @@ class UniverseManager:
         if row:
             try:
                 tickers = json.loads(row[0])
-                tickers = [ensure_utf8_universe(t) for t in tickers]
+                tickers = [ensure_utf8(t) for t in tickers]
                 conn.close()
                 return tickers
             except (json.JSONDecodeError, TypeError):
@@ -625,19 +561,19 @@ class UniverseManager:
         ''', (universe_name, query_date, query_date))
         
         rows = cursor.fetchall()
-        tickers = [ensure_utf8_universe(row[0]) for row in rows]
+        tickers = [ensure_utf8(row[0]) for row in rows]
         conn.close()
         
         return tickers
     
     def get_universe_info(self, universe_name):
         """Get summary info about a universe with UTF-8 safety"""
-        universe_name = ensure_utf8_universe(universe_name)
+        universe_name = ensure_utf8(universe_name)
         
         # Get current count
         current_tickers = self._get_current_constituents(universe_name)
         
-        conn = get_utf8_connection_universe(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         # Get last update date
@@ -670,14 +606,14 @@ class UniverseManager:
     
     def check_ticker(self, symbol, universe_name=None):
         """Check if a ticker is in one or more universes with UTF-8 safety"""
-        symbol_utf8 = clean_ticker_utf8(symbol)
+        symbol_utf8 = clean_ticker(symbol)
         
-        conn = get_utf8_connection_universe(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         if universe_name:
             # Clean universe name
-            universe_name = ensure_utf8_universe(universe_name)
+            universe_name = ensure_utf8(universe_name)
             
             # Check specific universe
             cursor.execute('''
@@ -711,7 +647,7 @@ class UniverseManager:
             univ_name, date_added, date_removed, tradable = row
             
             # Ensure UTF-8 for all string fields
-            univ_name = ensure_utf8_universe(univ_name)
+            univ_name = ensure_utf8(univ_name)
             status = 'ACTIVE' if date_removed is None else f'REMOVED on {date_removed}'
             
             universes_info.append({
@@ -730,11 +666,11 @@ class UniverseManager:
     
     def get_recent_changes(self, universe_name=None, days=30):
         """Get recent changes for a universe with UTF-8 safety"""
-        conn = get_utf8_connection_universe(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         if universe_name:
-            universe_name = ensure_utf8_universe(universe_name)
+            universe_name = ensure_utf8(universe_name)
             cursor.execute('''
                 SELECT date, symbol, action, reason
                 FROM change_log
@@ -759,18 +695,18 @@ class UniverseManager:
                 date_val, symbol, action, reason = change
                 sanitized_changes.append((
                     date_val,
-                    ensure_utf8_universe(symbol),
-                    ensure_utf8_universe(action),
-                    ensure_utf8_universe(reason) if reason else None
+                    ensure_utf8(symbol),
+                    ensure_utf8(action),
+                    ensure_utf8(reason) if reason else None
                 ))
             else:
                 univ_name, date_val, symbol, action, reason = change
                 sanitized_changes.append((
-                    ensure_utf8_universe(univ_name),
+                    ensure_utf8(univ_name),
                     date_val,
-                    ensure_utf8_universe(symbol),
-                    ensure_utf8_universe(action),
-                    ensure_utf8_universe(reason) if reason else None
+                    ensure_utf8(symbol),
+                    ensure_utf8(action),
+                    ensure_utf8(reason) if reason else None
                 ))
         
         return sanitized_changes
@@ -787,7 +723,7 @@ class UniverseManager:
                 print("Cancelled.")
                 return
             
-            conn = get_utf8_connection_universe(self.db_path)
+            conn = get_utf8_connection(self.db_path)
             cursor = conn.cursor()
             
             cursor.execute('DELETE FROM universe_constituents')
@@ -801,13 +737,13 @@ class UniverseManager:
             return
         
         # Clear specific universe
-        universe_name = ensure_utf8_universe(universe_name)
+        universe_name = ensure_utf8(universe_name)
         
         print(f"\n{'='*70}")
         print(f"CLEARING {universe_name.upper()} UNIVERSE")
         print(f"{'='*70}")
         
-        conn = get_utf8_connection_universe(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         cursor = conn.cursor()
         
         # Get count before deletion
@@ -842,7 +778,7 @@ class UniverseManager:
     def vacuum_database(self):
         """Optimize database (reclaim space after deletions) with UTF-8 safety"""
         print("Optimizing database...")
-        conn = get_utf8_connection_universe(self.db_path)
+        conn = get_utf8_connection(self.db_path)
         conn.execute('VACUUM')
         conn.execute('ANALYZE')
         conn.close()
@@ -855,7 +791,7 @@ class UniverseManager:
             return {}
         
         # Clean all symbols first
-        symbols = [clean_ticker_utf8(s) for s in symbols]
+        symbols = [clean_ticker(s) for s in symbols]
         symbols = [s for s in symbols if s]
         
         try:
@@ -870,7 +806,7 @@ class UniverseManager:
                 print(f"  Verifying... {min(i+batch_size, len(symbols))}/{len(symbols)}")
                 
                 for symbol in batch:
-                    symbol_clean = clean_ticker_utf8(symbol)
+                    symbol_clean = clean_ticker(symbol)
                     try:
                         asset = client.get_asset(symbol_clean)
                         results[symbol_clean] = asset.tradable
@@ -896,10 +832,10 @@ class UniverseManager:
     
     def print_ticker_info(self, symbol):
         """Delegate to reporter module with UTF-8 safety"""
-        symbol_clean = clean_ticker_utf8(symbol)
+        symbol_clean = clean_ticker(symbol)
         return self.reporter.print_ticker_info(symbol_clean)
     
     def diagnose_mismatch(self, universe_name):
         """Delegate to diagnostics module with UTF-8 safety"""
-        universe_name = ensure_utf8_universe(universe_name)
+        universe_name = ensure_utf8(universe_name)
         return self.diagnostics.diagnose_mismatch(universe_name)

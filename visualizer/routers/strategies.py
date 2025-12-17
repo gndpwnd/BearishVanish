@@ -48,6 +48,7 @@ async def get_strategy_summary(strategy_name: str):
     
     Returns all performance metrics, monthly data, and metadata
     """
+    import pandas as pd
     try:
         reader = get_current_analysis_reader()
         
@@ -61,14 +62,61 @@ async def get_strategy_summary(strategy_name: str):
             )
         
         # Get additional data
-        monthly = reader.get_monthly_returns(strategy_name)
-        drawdowns = reader.get_drawdown_periods(strategy_name, limit=5)
+        try:
+            monthly = reader.get_monthly_returns(strategy_name)
+            monthly_records = []
+            if not monthly.empty:
+                # Convert carefully, handling potential encoding issues
+                for _, row in monthly.iterrows():
+                    monthly_records.append({
+                        'year_month': str(row['year_month']),
+                        'return_pct': float(row['return_pct']) if row['return_pct'] is not None else None,
+                        'num_trades': int(row['num_trades']) if row['num_trades'] is not None else None,
+                        'win_rate_pct': float(row['win_rate_pct']) if row['win_rate_pct'] is not None else None,
+                    })
+        except Exception as e:
+            print(f"Error processing monthly returns: {traceback.format_exc()}")
+            monthly_records = []
+        
+        try:
+            drawdowns = reader.get_drawdown_periods(strategy_name, limit=5)
+            drawdown_records = []
+            if not drawdowns.empty:
+                # Convert carefully, handling potential encoding issues
+                for _, row in drawdowns.iterrows():
+                    record = {}
+                    for col in drawdowns.columns:
+                        val = row[col]
+                        if isinstance(val, bytes):
+                            try:
+                                record[col] = val.decode('utf-8')
+                            except:
+                                record[col] = val.decode('utf-8', errors='replace')
+                        elif isinstance(val, float) and not pd.isna(val):
+                            record[col] = float(val)
+                        elif isinstance(val, int):
+                            record[col] = int(val)
+                        else:
+                            record[col] = val
+                    drawdown_records.append(record)
+        except Exception as e:
+            print(f"Error processing drawdowns: {traceback.format_exc()}")
+            drawdown_records = []
+        
+        # Clean summary data - remove NaN and Inf values that can't be JSON serialized
+        if summary:
+            import math
+            for key in list(summary.keys()):
+                val = summary[key]
+                if isinstance(val, float):
+                    if math.isnan(val) or math.isinf(val):
+                        summary[key] = None
         
         return {
             "strategy_name": strategy_name,
             "summary": summary,
-            "monthly_returns": monthly.to_dict('records') if not monthly.empty else [],
-            "top_drawdowns": drawdowns.to_dict('records') if not drawdowns.empty else [],
+            "monthly_returns": monthly_records,
+            "top_drawdowns": drawdown_records,
             "metadata": reader.get_metadata()
         }
     except HTTPException:
@@ -99,7 +147,31 @@ async def get_strategy_metrics(strategy_name: str):
                 detail=f"Strategy '{strategy_name}' not found"
             )
         
-        return StrategyMetrics(**summary)
+        # Filter to only known fields in StrategyMetrics
+        allowed_fields = {
+            'total_return_pct', 'annualized_return_pct', 'total_profit_dollars',
+            'sharpe_ratio', 'sortino_ratio', 'calmar_ratio', 'max_drawdown_pct', 'volatility_annual_pct',
+            'win_rate_pct', 'profit_factor', 'completed_trades', 'winning_trades', 'losing_trades',
+            'avg_win_dollars', 'avg_loss_dollars', 'avg_hold_days', 'risk_reward_ratio',
+            'best_trade_pct', 'worst_trade_pct', 'total_trades', 'open_positions',
+            'gross_profit', 'gross_loss', 'expectancy_dollars', 'omega_ratio',
+            'max_drawdown_dollars', 'avg_drawdown_pct', 'downside_deviation_pct',
+            'var_95_pct', 'cvar_95_pct', 'beta', 'alpha_pct', 'correlation',
+            'information_ratio', 'treynor_ratio', 'max_hold_days', 'min_hold_days',
+            'max_win_streak', 'max_loss_streak', 'current_streak', 'computation_timestamp',
+            'source_simulation_db'
+        }
+        filtered_summary = {k: v for k, v in summary.items() if k in allowed_fields}
+        
+        # Clean NaN and Inf values that can't be JSON serialized
+        import math
+        for key in list(filtered_summary.keys()):
+            val = filtered_summary[key]
+            if isinstance(val, float):
+                if math.isnan(val) or math.isinf(val):
+                    filtered_summary[key] = None
+        
+        return StrategyMetrics(**filtered_summary)
     except HTTPException:
         raise
     except Exception as e:

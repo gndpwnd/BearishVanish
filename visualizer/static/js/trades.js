@@ -7,6 +7,39 @@ const { api, formatCurrency, formatPercent, formatDate } = window.TradingDashboa
 const { LoadingSpinner, ErrorMessage, Card, MetricCard } = window.TradingDashboard.Components;
 
 // ===================================================================
+// Pagination Component
+// ===================================================================
+const Pagination = ({ page, totalTrades, pageSize, onPageChange }) => {
+    const totalPages = Math.ceil(totalTrades / pageSize);
+    
+    if (totalPages <= 1) return null;  // Don't show if only 1 page
+    
+    return (
+        <div className="flex justify-center items-center space-x-4 mt-6">
+            <button
+                onClick={() => onPageChange(page - 1)}
+                disabled={page === 1}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+            >
+                ← Previous
+            </button>
+            
+            <span className="text-gray-700 font-medium">
+                Page {page} of {totalPages}
+            </span>
+            
+            <button
+                onClick={() => onPageChange(page + 1)}
+                disabled={page >= totalPages}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+            >
+                Next →
+            </button>
+        </div>
+    );
+};
+
+// ===================================================================
 // Trades View Component
 // ===================================================================
 const TradesView = ({ strategy }) => {
@@ -116,6 +149,13 @@ const TradesView = ({ strategy }) => {
                         </tbody>
                     </table>
                 </div>
+                {/* NEW: Pagination Controls */}
+                <Pagination 
+                    page={page}
+                    totalTrades={trades.length * 10}  // Approximate total
+                    pageSize={CONFIG.PAGE_SIZE}
+                    onPageChange={(newPage) => setPage(newPage)}
+                />
             </Card>
         </div>
     );

@@ -524,7 +524,7 @@ from io import StringIO
 # UTF-8 SAFETY HELPERS (add to top of file)
 # ============================================================
 
-def ensure_utf8_universe(text):
+def ensure_utf8(text):
     """Ensure text is valid UTF-8 (same as telemetry version)"""
     if text is None:
         return None
@@ -544,20 +544,20 @@ def ensure_utf8_universe(text):
     except UnicodeEncodeError:
         return text.encode('utf-8', errors='replace').decode('utf-8')
 
-def get_utf8_connection_universe(db_path):
+def get_utf8_connection(db_path):
     """Create SQLite connection with UTF-8 encoding"""
     conn = sqlite3.connect(db_path)
     conn.text_factory = str
     conn.execute("PRAGMA encoding = 'UTF-8'")
     return conn
 
-def clean_ticker_utf8(ticker):
+def clean_ticker(ticker):
     """Clean ticker symbol and ensure UTF-8 compatibility"""
     if not ticker:
         return None
     
     # Ensure UTF-8
-    ticker = ensure_utf8_universe(ticker)
+    ticker = ensure_utf8(ticker)
     
     # Strip whitespace and convert to uppercase
     ticker = ticker.strip().upper()
@@ -574,7 +574,7 @@ def clean_ticker_utf8(ticker):
 # Replace the _init_database method:
 def _init_database(self):
     """Initialize SQLite database with UTF-8 encoding"""
-    conn = get_utf8_connection_universe(self.db_path)
+    conn = get_utf8_connection(self.db_path)
     cursor = conn.cursor()
     
     # Set UTF-8 encoding explicitly
@@ -656,7 +656,7 @@ def _fetch_sp500(self):
         
         # Clean tickers with UTF-8 safety
         raw_tickers = df['Symbol'].tolist()
-        tickers = [clean_ticker_utf8(t) for t in raw_tickers]
+        tickers = [clean_ticker(t) for t in raw_tickers]
         tickers = [t for t in tickers if t]  # Remove None values
         
         # Additional cleaning
@@ -694,7 +694,7 @@ def _fetch_nasdaq100(self):
         
         # Clean tickers with UTF-8 safety
         raw_tickers = df['Symbol'].tolist()
-        tickers = [clean_ticker_utf8(t) for t in raw_tickers]
+        tickers = [clean_ticker(t) for t in raw_tickers]
         tickers = [t for t in tickers if t]
         
         # Additional cleaning
@@ -740,7 +740,7 @@ def update_universe(self, universe_name):
         return
     
     # Ensure all tickers are UTF-8 clean
-    tickers = [clean_ticker_utf8(t) for t in tickers]
+    tickers = [clean_ticker(t) for t in tickers]
     tickers = [t for t in tickers if t]
     
     # Get previous constituents
@@ -751,7 +751,7 @@ def update_universe(self, universe_name):
     removed = set(previous_tickers) - set(tickers)
     
     current_date = date.today()
-    conn = get_utf8_connection_universe(self.db_path)
+    conn = get_utf8_connection(self.db_path)
     cursor = conn.cursor()
     
     # Mark removed stocks
@@ -759,15 +759,15 @@ def update_universe(self, universe_name):
         print(f"\n📉 REMOVALS DETECTED: {len(removed)} stocks")
         sample_removed = list(removed)[:10]
         for symbol in sample_removed:
-            print(f"  • {ensure_utf8_universe(symbol)} removed")
+            print(f"  • {ensure_utf8(symbol)} removed")
         
         if len(removed) > 10:
             print(f"  • ... and {len(removed) - 10} more")
         
         for symbol in removed:
             # Ensure UTF-8 before writing
-            symbol_utf8 = ensure_utf8_universe(symbol)
-            universe_utf8 = ensure_utf8_universe(universe_name)
+            symbol_utf8 = ensure_utf8(symbol)
+            universe_utf8 = ensure_utf8(universe_name)
             
             cursor.execute('''
                 UPDATE universe_constituents
@@ -794,15 +794,15 @@ def update_universe(self, universe_name):
         print(f"\n📈 ADDITIONS DETECTED: {len(added)} stocks")
         sample_added = list(added)[:10]
         for symbol in sample_added:
-            print(f"  • {ensure_utf8_universe(symbol)} added")
+            print(f"  • {ensure_utf8(symbol)} added")
         
         if len(added) > 10:
             print(f"  • ... and {len(added) - 10} more")
         
         for symbol in added:
             # Ensure UTF-8 before writing
-            symbol_utf8 = ensure_utf8_universe(symbol)
-            universe_utf8 = ensure_utf8_universe(universe_name)
+            symbol_utf8 = ensure_utf8(symbol)
+            universe_utf8 = ensure_utf8(universe_name)
             
             # Check if exists but was removed
             cursor.execute('''
@@ -843,9 +843,9 @@ def update_universe(self, universe_name):
             ))
     
     # Create daily snapshot with UTF-8 safe JSON
-    tickers_utf8 = [ensure_utf8_universe(t) for t in tickers]
+    tickers_utf8 = [ensure_utf8(t) for t in tickers]
     tickers_json = json.dumps(sorted(tickers_utf8), ensure_ascii=False)
-    universe_utf8 = ensure_utf8_universe(universe_name)
+    universe_utf8 = ensure_utf8(universe_name)
     
     cursor.execute('''
         INSERT OR REPLACE INTO daily_snapshots
@@ -883,10 +883,10 @@ def update_universe(self, universe_name):
 # Replace the _get_current_constituents method:
 def _get_current_constituents(self, universe_name):
     """Get currently active constituents with UTF-8 safety"""
-    conn = get_utf8_connection_universe(self.db_path)
+    conn = get_utf8_connection(self.db_path)
     cursor = conn.cursor()
     
-    universe_utf8 = ensure_utf8_universe(universe_name)
+    universe_utf8 = ensure_utf8(universe_name)
     
     cursor.execute('''
         SELECT DISTINCT symbol
@@ -894,7 +894,7 @@ def _get_current_constituents(self, universe_name):
         WHERE universe_name = ? AND date_removed IS NULL
     ''', (universe_utf8,))
     
-    tickers = [ensure_utf8_universe(row[0]) for row in cursor.fetchall()]
+    tickers = [ensure_utf8(row[0]) for row in cursor.fetchall()]
     conn.close()
     
     return tickers
@@ -905,10 +905,10 @@ def get_approved_tickers(self, universe_name, query_date=None):
     if query_date is None:
         query_date = date.today()
     
-    conn = get_utf8_connection_universe(self.db_path)
+    conn = get_utf8_connection(self.db_path)
     cursor = conn.cursor()
     
-    universe_utf8 = ensure_utf8_universe(universe_name)
+    universe_utf8 = ensure_utf8(universe_name)
     
     # Try daily snapshot first
     cursor.execute('''
@@ -924,7 +924,7 @@ def get_approved_tickers(self, universe_name, query_date=None):
         # Parse JSON with UTF-8 safety
         try:
             tickers = json.loads(row[0])
-            tickers = [ensure_utf8_universe(t) for t in tickers]
+            tickers = [ensure_utf8(t) for t in tickers]
             conn.close()
             return tickers
         except (json.JSONDecodeError, TypeError):
@@ -940,7 +940,7 @@ def get_approved_tickers(self, universe_name, query_date=None):
           AND (date_removed IS NULL OR date_removed > ?)
     ''', (universe_utf8, query_date, query_date))
     
-    tickers = [ensure_utf8_universe(row[0]) for row in cursor.fetchall()]
+    tickers = [ensure_utf8(row[0]) for row in cursor.fetchall()]
     conn.close()
     
     return tickers
@@ -948,13 +948,13 @@ def get_approved_tickers(self, universe_name, query_date=None):
 # Replace the check_ticker method:
 def check_ticker(self, symbol, universe_name=None):
     """Check ticker with UTF-8 safety"""
-    symbol_utf8 = ensure_utf8_universe(symbol.upper())
+    symbol_utf8 = ensure_utf8(symbol.upper())
     
-    conn = get_utf8_connection_universe(self.db_path)
+    conn = get_utf8_connection(self.db_path)
     cursor = conn.cursor()
     
     if universe_name:
-        universe_utf8 = ensure_utf8_universe(universe_name)
+        universe_utf8 = ensure_utf8(universe_name)
         cursor.execute('''
             SELECT universe_name, date_added, date_removed, is_tradable_alpaca
             FROM universe_constituents
@@ -987,7 +987,7 @@ def check_ticker(self, symbol, universe_name=None):
         status = 'ACTIVE' if date_removed is None else f'REMOVED on {date_removed}'
         
         universes_info.append({
-            'universe': ensure_utf8_universe(univ_name),
+            'universe': ensure_utf8(univ_name),
             'status': status,
             'date_added': date_added,
             'date_removed': date_removed,
@@ -1014,7 +1014,7 @@ from datetime import datetime
 # UTF-8 SAFETY HELPERS (add to top of file)
 # ============================================================
 
-def ensure_utf8_data(text):
+def ensure_utf8(text):
     """Ensure text is valid UTF-8"""
     if text is None:
         return None
@@ -1045,13 +1045,13 @@ def get_utf8_connection_data(db_path, timeout=30.0):
     conn.execute('PRAGMA temp_store=MEMORY')
     return conn
 
-def clean_symbol_utf8(symbol):
+def clean_ticker(symbol):
     """Clean symbol and ensure UTF-8/ASCII compatibility"""
     if not symbol:
         return None
     
     # Ensure UTF-8
-    symbol = ensure_utf8_data(symbol)
+    symbol = ensure_utf8(symbol)
     
     # Strip and uppercase
     symbol = symbol.strip().upper()
@@ -1136,7 +1136,7 @@ def load_multiple_symbols_batch(self, symbols, start_date=None, end_date=None):
         return {}
     
     # Clean all symbols
-    symbols = [clean_symbol_utf8(s) for s in symbols]
+    symbols = [clean_ticker(s) for s in symbols]
     symbols = [s for s in symbols if s]  # Remove None values
     
     if not symbols:
@@ -1184,7 +1184,7 @@ def load_multiple_symbols_batch(self, symbols, start_date=None, end_date=None):
         
         for symbol in symbol_iterator:
             # Ensure symbol is UTF-8 clean for comparison
-            symbol_clean = clean_symbol_utf8(symbol)
+            symbol_clean = clean_ticker(symbol)
             df_symbol = df_all[df_all['symbol'] == symbol_clean].copy()
             
             if not df_symbol.empty:
@@ -1204,7 +1204,7 @@ def load_offline_data(self, symbol, start_date=None, end_date=None):
     """Load cached data with UTF-8 safety"""
     try:
         # Clean symbol
-        symbol = clean_symbol_utf8(symbol)
+        symbol = clean_ticker(symbol)
         if not symbol:
             return None
         
@@ -1244,7 +1244,7 @@ def save_offline_data(self, symbol, df):
     """Save data with UTF-8 safety"""
     try:
         # Clean symbol
-        symbol = clean_symbol_utf8(symbol)
+        symbol = clean_ticker(symbol)
         if not symbol:
             return False
         
@@ -1316,7 +1316,7 @@ def save_offline_data(self, symbol, df):
 def _update_metadata(self, symbol, conn):
     """Update metadata with UTF-8 safety"""
     # Clean symbol
-    symbol = clean_symbol_utf8(symbol)
+    symbol = clean_ticker(symbol)
     if not symbol:
         return
     
@@ -1341,7 +1341,7 @@ def get_data_range(self, symbol):
     """Get data range with UTF-8 safety"""
     try:
         # Clean symbol
-        symbol = clean_symbol_utf8(symbol)
+        symbol = clean_ticker(symbol)
         if not symbol:
             return None
         
@@ -1373,7 +1373,7 @@ def get_stock_data(self, symbol, days=180):
     """Main method to get stock data with UTF-8 safety"""
     try:
         # Clean symbol
-        symbol = clean_symbol_utf8(symbol)
+        symbol = clean_ticker(symbol)
         if not symbol:
             print(f"❌ Invalid symbol provided")
             return None
@@ -1404,7 +1404,7 @@ def list_cached_symbols(self):
         cached = []
         for row in cursor.fetchall():
             # Ensure symbol is UTF-8 clean
-            symbol = ensure_utf8_data(row[0])
+            symbol = ensure_utf8(row[0])
             start_date = datetime.fromtimestamp(row[1]).date()
             end_date = datetime.fromtimestamp(row[2]).date()
             cached.append({

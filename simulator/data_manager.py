@@ -21,60 +21,12 @@ import time
 import json
 import threading
 
+# Import shared UTF-8 utilities
+from utilities.utf8_helpers import ensure_utf8, get_utf8_connection, clean_ticker
+
 OFFLINE_DATA_DIR = Path('./offline_data')
 DB_PATH = OFFLINE_DATA_DIR / 'stock_data.db'
 PROGRESS_FILE = OFFLINE_DATA_DIR / 'download_progress.json'
-
-# ============================================================
-# UTF-8 SAFETY HELPERS
-# ============================================================
-
-def ensure_utf8_data(text):
-    """Ensure text is valid UTF-8"""
-    if text is None:
-        return None
-    
-    if isinstance(text, bytes):
-        try:
-            return text.decode('utf-8', errors='replace')
-        except:
-            return text.decode('latin-1', errors='replace')
-    
-    if not isinstance(text, str):
-        text = str(text)
-    
-    try:
-        text.encode('utf-8')
-        return text
-    except UnicodeEncodeError:
-        return text.encode('utf-8', errors='replace').decode('utf-8')
-
-def get_utf8_connection_data(db_path, timeout=30.0):
-    """Create SQLite connection with UTF-8 encoding"""
-    conn = sqlite3.connect(db_path, timeout=timeout)
-    conn.text_factory = str
-    conn.execute("PRAGMA encoding = 'UTF-8'")
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA synchronous=NORMAL')
-    conn.execute('PRAGMA cache_size=10000')
-    conn.execute('PRAGMA temp_store=MEMORY')
-    return conn
-
-def clean_symbol_utf8(symbol):
-    """Clean symbol and ensure UTF-8/ASCII compatibility"""
-    if not symbol:
-        return None
-    
-    # Ensure UTF-8
-    symbol = ensure_utf8_data(symbol)
-    
-    # Strip and uppercase
-    symbol = symbol.strip().upper()
-    
-    # Remove any non-ASCII characters (symbols should be ASCII)
-    symbol = ''.join(c for c in symbol if ord(c) < 128)
-    
-    return symbol if symbol else None
 
 class DataManager:
     def __init__(self, api_key, secret_key, offline_mode=False, quiet=True):
@@ -115,7 +67,14 @@ class DataManager:
             if self._connection_pool:
                 return self._connection_pool.pop()
             else:
-                conn = get_utf8_connection_data(self.db_path)
+                # Use shared utility with SQLite optimization pragmas
+                conn = get_utf8_connection(
+                    self.db_path,
+                    journal_mode='WAL',
+                    synchronous='NORMAL',
+                    cache_size=10000,
+                    temp_store='MEMORY'
+                )
                 return conn
     
     def _return_connection(self, conn):
@@ -128,7 +87,13 @@ class DataManager:
     
     def _init_database(self):
         """Initialize SQLite database with UTF-8 encoding"""
-        conn = get_utf8_connection_data(self.db_path)
+        conn = get_utf8_connection(
+            self.db_path,
+            journal_mode='WAL',
+            synchronous='NORMAL',
+            cache_size=10000,
+            temp_store='MEMORY'
+        )
         
         cursor = conn.cursor()
         
@@ -183,7 +148,7 @@ class DataManager:
             return {}
         
         # Clean all symbols
-        symbols_clean = [clean_symbol_utf8(s) for s in symbols]
+        symbols_clean = [clean_ticker(s) for s in symbols]
         symbols_clean = [s for s in symbols_clean if s]  # Remove None values
         
         if not symbols_clean:
@@ -247,7 +212,7 @@ class DataManager:
         """Load cached data for a single symbol with UTF-8 safety"""
         try:
             # Clean symbol
-            symbol = clean_symbol_utf8(symbol)
+            symbol = clean_ticker(symbol)
             if not symbol:
                 return None
             
@@ -286,7 +251,7 @@ class DataManager:
         """Save data to SQLite database with UTF-8 safety"""
         try:
             # Clean symbol
-            symbol = clean_symbol_utf8(symbol)
+            symbol = clean_ticker(symbol)
             if not symbol:
                 return False
             
@@ -357,7 +322,7 @@ class DataManager:
     def _update_metadata(self, symbol, conn):
         """Update metadata for a symbol with UTF-8 safety"""
         # Ensure symbol is clean
-        symbol = clean_symbol_utf8(symbol)
+        symbol = clean_ticker(symbol)
         if not symbol:
             return
         
@@ -401,7 +366,7 @@ class DataManager:
             retry_count = self.retry_count
         
         # Clean symbol
-        symbol = clean_symbol_utf8(symbol)
+        symbol = clean_ticker(symbol)
         if not symbol:
             return None
         
@@ -470,7 +435,7 @@ class DataManager:
                     print(f"❌ API error for {symbol} (attempt {attempt + 1}/{retry_count}): {error_msg}")
                     self.api_errors.append({
                         'symbol': symbol,
-                        'error': ensure_utf8_data(error_msg),
+                        'error': ensure_utf8(error_msg),
                         'timestamp': datetime.now()
                     })
                     self.failed_symbols.add(symbol)
@@ -482,7 +447,7 @@ class DataManager:
         """Get the date range of cached data for a symbol with UTF-8 safety"""
         try:
             # Clean symbol
-            symbol = clean_symbol_utf8(symbol)
+            symbol = clean_ticker(symbol)
             if not symbol:
                 return None
             
@@ -512,7 +477,7 @@ class DataManager:
     def find_gaps(self, symbol, start_date, end_date):
         """Identify gaps in the data with UTF-8 safety"""
         # Clean symbol
-        symbol = clean_symbol_utf8(symbol)
+        symbol = clean_ticker(symbol)
         if not symbol:
             return []
         
@@ -546,7 +511,7 @@ class DataManager:
         """Main method to get stock data with UTF-8 safety"""
         try:
             # Clean symbol
-            symbol = clean_symbol_utf8(symbol)
+            symbol = clean_ticker(symbol)
             if not symbol:
                 print(f"❌ Invalid symbol provided")
                 return None
@@ -607,7 +572,7 @@ class DataManager:
             cached = []
             for row in cursor.fetchall():
                 # Ensure symbol is UTF-8 clean
-                symbol = ensure_utf8_data(row[0])
+                symbol = ensure_utf8(row[0])
                 start_date = datetime.fromtimestamp(row[1]).date()
                 end_date = datetime.fromtimestamp(row[2]).date()
                 cached.append({
@@ -641,7 +606,7 @@ class DataManager:
                 print(f"{'Symbol':<10} {'Bars':<10} {'Date Range'}")
                 print(f"{'-'*60}")
                 for item in cached[:20]:
-                    symbol = ensure_utf8_data(item['symbol'])
+                    symbol = ensure_utf8(item['symbol'])
                     print(f"{symbol:<10} {item['bars']:<10} {item['date_range']}")
                 
                 if len(cached) > 20:
@@ -665,11 +630,16 @@ class DataManager:
         except Exception as e:
             print(f"❌ Error optimizing database: {e}")
     
-    def __del__(self):
-        """Cleanup connection pool on exit"""
+    def close_all_connections(self):
+        """Clean up connection pool"""
         with self._connection_lock:
             for conn in self._connection_pool:
                 try:
                     conn.close()
                 except:
                     pass
+            self._connection_pool.clear()
+
+    def __del__(self):
+        """Cleanup connection pool on exit"""
+        self.close_all_connections()

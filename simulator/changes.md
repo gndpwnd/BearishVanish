@@ -37,9 +37,9 @@ Your simulation engine is well-architected with comprehensive UTF-8 safety measu
 #### `stock_universe.py`
 ```python
 # Lines 22-86: Universe-specific UTF-8 safety
-- ensure_utf8_universe() function
-- clean_ticker_utf8() removes non-ASCII from tickers
-- get_utf8_connection_universe() with encoding pragma
+- ensure_utf8() function
+- clean_ticker() removes non-ASCII from tickers
+- get_utf8_connection() with encoding pragma
 - sanitize_json_utf8() for JSON fields
 ```
 
@@ -281,7 +281,7 @@ momentum = data['CustomMomentum'].iloc[-1]
 
 **Files:**
 - `simulation_telemetry.py` - `ensure_utf8()`, `sanitize_json()`
-- `stock_universe.py` - `ensure_utf8_universe()`, `sanitize_json_utf8()`
+- `stock_universe.py` - `ensure_utf8()`, `sanitize_json_utf8()`
 - `data_manager.py` - `ensure_utf8_data()`, `clean_symbol_utf8()`
 
 **Recommendation:** Create a shared utility module

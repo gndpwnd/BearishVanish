@@ -1,5 +1,5 @@
 # ============================================================================
-# FILE 6: calculators/streak_metrics.py
+# FILE 6: calculators/streak_metrics.py - FIXED VERSION
 # ============================================================================
 
 """
@@ -22,36 +22,40 @@ class StreakMetricsCalculator(BaseCalculator):
             dict: Streak statistics
             list: List of significant streaks
         """
-        if self.closed_trades.empty:
+        if self.closed_trades.empty or 'profit_loss_dollars' not in self.closed_trades.columns:
+            return {'metrics': self._empty_metrics(), 'streaks': []}
+        
+        # Filter out trades with missing P&L data
+        valid_trades = self.closed_trades[self.closed_trades['profit_loss_dollars'].notna()]
+        
+        if valid_trades.empty:
             return {'metrics': self._empty_metrics(), 'streaks': []}
         
         # Create outcomes array (1 = win, 0 = loss)
-        outcomes = (self.closed_trades['profit_loss_dollars'] > 0).astype(int).values
+        outcomes = (valid_trades['profit_loss_dollars'] > 0).astype(int).values
         
-        # Calculate streaks
+        # Update self.closed_trades to use only valid trades for streak calculations
+        self.closed_trades = valid_trades
+        
+        # FIX: Actually calculate and return the metrics!
         win_streaks = self._find_streaks(outcomes, 1)
         loss_streaks = self._find_streaks(outcomes, 0)
-        
-        # Current streak
-        current_streak_len = self._calculate_current_streak(outcomes)
-        current_streak_type = 'WIN' if outcomes[-1] == 1 else 'LOSS'
+        current_streak = self._calculate_current_streak(outcomes)
+        streak_periods = self._identify_streak_periods(outcomes)
         
         metrics = {
             'max_win_streak': max(win_streaks) if win_streaks else 0,
             'max_loss_streak': max(loss_streaks) if loss_streaks else 0,
             'avg_win_streak': np.mean(win_streaks) if win_streaks else 0,
             'avg_loss_streak': np.mean(loss_streaks) if loss_streaks else 0,
-            'current_streak': current_streak_len,
-            'current_streak_type': current_streak_type,
+            'current_streak': current_streak if outcomes[-1] == 1 else -current_streak,
+            'current_streak_type': 'WIN' if outcomes[-1] == 1 else 'LOSS',
             'num_win_streaks_3plus': sum(1 for s in win_streaks if s >= 3),
             'num_loss_streaks_3plus': sum(1 for s in loss_streaks if s >= 3),
         }
         
-        # Detailed streak periods
-        streaks = self._identify_streak_periods(outcomes)
-        
-        return {'metrics': metrics, 'streaks': streaks}
-    
+        return {'metrics': metrics, 'streaks': streak_periods}
+
     def _find_streaks(self, outcomes, target):
         """Find all streaks of target value"""
         streaks = []
@@ -125,7 +129,7 @@ class StreakMetricsCalculator(BaseCalculator):
             'length': len(indices),
             'start_date': str(trades.iloc[0]['entry_date']),
             'end_date': str(trades.iloc[-1]['exit_date']) if 'exit_date' in trades.columns else None,
-            'cumulative_pnl': trades['profit_loss_dollars'].sum(),
+            'cumulative_pnl': float(trades['profit_loss_dollars'].sum()),
         }
     
     def _empty_metrics(self):

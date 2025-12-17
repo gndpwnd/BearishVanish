@@ -83,7 +83,11 @@ class DrawdownMetricsCalculator(BaseCalculator):
             
             elif in_drawdown and drawdowns[i] >= -1:
                 # End of drawdown (recovered)
-                trough_idx = dd_start_idx + np.argmin(drawdowns[dd_start_idx:i+1])
+                dd_slice = drawdowns[dd_start_idx:i+1]
+                if len(dd_slice) > 0:
+                    trough_idx = dd_start_idx + np.argmin(dd_slice)
+                else:
+                    trough_idx = dd_start_idx
                 
                 period = {
                     'peak_date': str(dates[peak_idx]),

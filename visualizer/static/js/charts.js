@@ -8,6 +8,8 @@ const { CONFIG, formatCurrency } = window.TradingDashboard;
 // ===================================================================
 // Line Chart Component
 // ===================================================================
+
+
 const LineChartComponent = ({ data, labels, label, height = 300, showBaseline = false, baselineValue = null }) => {
     const canvasRef = useRef(null);
     const chartRef = useRef(null);
@@ -97,12 +99,17 @@ const LineChartComponent = ({ data, labels, label, height = 300, showBaseline = 
         };
     }, [data, labels]);
 
-    return <canvas ref={canvasRef} height={height}></canvas>;
+    return (
+        <div style={{ position: 'relative', height: `${height}px`, width: '100%' }}>
+            <canvas ref={canvasRef}></canvas>
+        </div>
+    );
 };
 
 // ===================================================================
 // Bar Chart Component
 // ===================================================================
+
 const BarChartComponent = ({ data, labels, label, height = 250, colorize = false }) => {
     const canvasRef = useRef(null);
     const chartRef = useRef(null);
@@ -167,7 +174,11 @@ const BarChartComponent = ({ data, labels, label, height = 250, colorize = false
         };
     }, [data, labels]);
 
-    return <canvas ref={canvasRef} height={height}></canvas>;
+    return (
+        <div style={{ position: 'relative', height: `${height}px`, width: '100%' }}>
+            <canvas ref={canvasRef}></canvas>
+        </div>
+    );
 };
 
 // Export chart components

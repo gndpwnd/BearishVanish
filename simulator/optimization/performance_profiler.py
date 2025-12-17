@@ -364,6 +364,7 @@ class PerformanceProfiler:
         import sqlite3
         
         conn = sqlite3.connect(db_path)
+        conn.text_factory = str  # Ensure UTF-8 compatibility
         conn.execute('PRAGMA temp_store = MEMORY')
         conn.execute('PRAGMA journal_mode = WAL')
         

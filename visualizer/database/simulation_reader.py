@@ -27,6 +27,7 @@ class SimulationReader:
             raise FileNotFoundError(f"Simulation database not found: {db_path}")
         
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn.text_factory = str  # FIX: Handle UTF-8 text properly
         self.conn.row_factory = sqlite3.Row
     
     def _decode_value(self, value):

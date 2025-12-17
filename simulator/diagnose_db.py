@@ -222,6 +222,7 @@ def main():
     
     try:
         conn = sqlite3.connect(db_path)
+        conn.text_factory = str  # Ensure UTF-8 compatibility
         cursor = conn.cursor()
         
         # List all tables

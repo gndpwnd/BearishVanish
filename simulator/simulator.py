@@ -16,9 +16,18 @@ import json
 import importlib.util
 import sys
 import sqlite3
+import logging
 
 from strategy_tracker import StrategyTracker
 from simulation_telemetry import SimulationTelemetry, BatchBuffer
+
+# Configure logging
+logging.basicConfig(
+    filename='simulation_errors.log',
+    level=logging.ERROR,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def print_simulation_progress(completed, total, current_strategy=None, current_symbol=None):
     """Print clean progress updates"""
@@ -520,10 +529,14 @@ def run_single_strategy_on_symbol(strategy_name: str,
         }
         
     except Exception as e:
-        # STILL REPORT ERRORS - don't silently swallow them
-        print(f"❌ Error in {strategy_name} on {symbol}: {e}")
+        # Log error to file AND print to console
+        error_msg = f"Error in {strategy_name} on {symbol}: {e}"
+        logger.error(error_msg, exc_info=True)
+        print(f"âŒ {error_msg}")
+        
         import traceback
-        traceback.print_exc()  # Add traceback for debugging
+        traceback.print_exc()
+        
         return {
             'strategy': strategy_name,
             'symbol': symbol,
@@ -709,8 +722,11 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                         all_portfolio_snapshots.extend(result.get('portfolio_snapshots', []))
                     
                 except Exception as e:
-                    # Show errors clearly
-                    print(f"\n❌ Error processing {strategy_name} on {symbol}: {e}")
+                    # Log and display errors
+                    error_msg = f"Error processing {strategy_name} on {symbol}: {e}"
+                    logger.error(error_msg, exc_info=True)
+                    print(f"\nâŒ {error_msg}")
+                    
                     import traceback
                     traceback.print_exc()
                 
@@ -773,6 +789,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         
         # Store config in database
         conn = sqlite3.connect(telemetry.db_path)
+        conn.text_factory = str  # Ensure UTF-8 compatibility
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -836,6 +853,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     # Quick verification
     try:
         conn = sqlite3.connect(telemetry.db_path)
+        conn.text_factory = str  # Ensure UTF-8 compatibility
         cursor = conn.cursor()
         
         print(f"\n📊 QUICK VERIFICATION:")
@@ -894,6 +912,7 @@ def test_performance_improvement(strategies, symbols, data_manager, universe_man
     # Verify data was written
     import sqlite3
     conn = sqlite3.connect(db_path)
+    conn.text_factory = str  # Ensure UTF-8 compatibility
     cursor = conn.cursor()
     
     tables = ['trade_attempts', 'trade_history', 'portfolio_history', 'strategy_performance']

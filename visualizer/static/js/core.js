@@ -21,16 +21,70 @@ const CONFIG = {
 };
 
 // ===================================================================
-// API Client
+// Simple Cache Implementation
+// ===================================================================
+const cache = {
+    data: new Map(),
+    ttl: 5 * 60 * 1000, // 5 minutes
+    
+    get(key) {
+        const item = this.data.get(key);
+        if (!item) return null;
+        
+        // Check if expired
+        if (Date.now() - item.timestamp > this.ttl) {
+            this.data.delete(key);
+            return null;
+        }
+        
+        return item.value;
+    },
+    
+    set(key, value) {
+        this.data.set(key, {
+            value,
+            timestamp: Date.now()
+        });
+    },
+    
+    clear() {
+        this.data.clear();
+    }
+};
+
+// ===================================================================
+// API Client (with caching)
 // ===================================================================
 const api = {
     async request(endpoint, options = {}) {
+        // Create cache key
+        const method = options.method || 'GET';
+        const cacheKey = `${method}:${endpoint}`;
+        
+        // Check cache for GET requests
+        if (method === 'GET') {
+            const cached = cache.get(cacheKey);
+            if (cached) {
+                console.log(`✅ Cache hit: ${endpoint}`);
+                return cached;
+            }
+        }
+        
+        // Make request
         const response = await fetch(`${CONFIG.API_BASE}${endpoint}`, options);
         if (!response.ok) {
             const error = await response.json().catch(() => ({ detail: 'API Error' }));
             throw new Error(error.detail || 'API Error');
         }
-        return response.json();
+        
+        const data = await response.json();
+        
+        // Cache GET requests
+        if (method === 'GET') {
+            cache.set(cacheKey, data);
+        }
+        
+        return data;
     },
 
     get(endpoint) {
@@ -47,7 +101,10 @@ const api = {
 
     // Analyses
     getAnalyses: () => api.get('/analyses'),
-    selectAnalysis: (id) => api.post(`/analyses/select/${id}`, {}),
+    selectAnalysis: (id) => {
+        cache.clear();  // Clear cache when switching analysis
+        return api.post(`/analyses/select/${id}`, {});
+    },
     getCurrentAnalysis: () => api.get('/analyses/current/info'),
 
     // Strategies

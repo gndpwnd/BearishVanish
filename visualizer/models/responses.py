@@ -71,9 +71,34 @@ class StrategyMetrics(BaseResponse):
     avg_hold_days: float
     risk_reward_ratio: float
     
-    # Additional
+    # Additional (may not be in DB)
     best_trade_pct: Optional[float] = None
     worst_trade_pct: Optional[float] = None
+    
+    # Optional fields that might come from database
+    total_trades: Optional[int] = None
+    open_positions: Optional[int] = None
+    gross_profit: Optional[float] = None
+    gross_loss: Optional[float] = None
+    expectancy_dollars: Optional[float] = None
+    omega_ratio: Optional[float] = None
+    max_drawdown_dollars: Optional[float] = None
+    avg_drawdown_pct: Optional[float] = None
+    downside_deviation_pct: Optional[float] = None
+    var_95_pct: Optional[float] = None
+    cvar_95_pct: Optional[float] = None
+    beta: Optional[float] = None
+    alpha_pct: Optional[float] = None
+    correlation: Optional[float] = None
+    information_ratio: Optional[float] = None
+    treynor_ratio: Optional[float] = None
+    max_hold_days: Optional[float] = None
+    min_hold_days: Optional[float] = None
+    max_win_streak: Optional[int] = None
+    max_loss_streak: Optional[int] = None
+    current_streak: Optional[int] = None
+    computation_timestamp: Optional[int] = None
+    source_simulation_db: Optional[str] = None
 
 
 class StrategySummary(BaseResponse):

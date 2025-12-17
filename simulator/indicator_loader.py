@@ -10,9 +10,10 @@ from typing import Dict, List, Any, Callable, Type
 import networkx as nx
 import pandas as pd
 import numpy as np
+import hashlib
+import json
 
 from indicator_base import IndicatorBase, BUILTIN_FUNCTIONS, BUILTIN_CLASSES
-
 
 class IndicatorLibrary:
     """
@@ -112,11 +113,12 @@ class IndicatorLibrary:
         """
         Get indicator value with caching and dependency resolution
         """
-        import pandas as pd
         
-        # Create cache key
-        cache_key = f"{indicator_name}_{len(data)}_{hash(frozenset(params.items()))}"
-        
+        # Create deterministic cache key
+        params_str = json.dumps(sorted(params.items()), sort_keys=True)
+        params_hash = hashlib.md5(params_str.encode()).hexdigest()[:8]
+        cache_key = f"{indicator_name}_{len(data)}_{params_hash}"
+
         if cache_key in self._cache:
             return self._cache[cache_key]
         

@@ -18,6 +18,9 @@ from datetime import datetime
 import time
 import json
 
+# Import UTF-8 utilities
+from utilities.utf8_helpers import ensure_utf8, get_utf8_connection
+
 # Import database reader and schema
 from db_reader import SimulationReader
 from analysis_db_schema import create_analysis_database
@@ -61,8 +64,8 @@ class AnalysisEngine:
         # Create analysis database
         create_analysis_database(self.analysis_db_path)
         
-        # Connect to analysis database
-        self.conn = sqlite3.connect(str(self.analysis_db_path))
+        # Connect to analysis database with UTF-8 safety
+        self.conn = get_utf8_connection(str(self.analysis_db_path))
         
         print(f"📊 ANALYSIS ENGINE")
         print(f"   Input:  {self.sim_db_path.name}")
@@ -108,6 +111,12 @@ class AnalysisEngine:
             print(f"\n[{i}/{len(strategies)}] Analyzing: {strategy_name}")
             self._analyze_strategy(strategy_name)
         
+        # Also analyze SPY benchmark if available
+        try:
+            self._analyze_benchmark()
+        except Exception as e:
+            print(f"⚠️  Could not analyze SPY benchmark: {e}")
+        
         # Store metadata
         self._store_metadata()
         
@@ -133,92 +142,171 @@ class AnalysisEngine:
     
     def _analyze_strategy(self, strategy_name):
         """
-        Analyze a single strategy using all calculators
+        Analyze a single strategy using all calculators with error boundaries
         
         Args:
             strategy_name: Strategy to analyze
         """
         timestamp = int(time.time())
         
+        # Initialize empty metrics (in case calculators fail)
+        trade_metrics = {}
+        risk_metrics = {}
+        dd_metrics = {}
+        dd_periods = []
+        streak_metrics = {}
+        streak_periods = []
+        monthly_data = {}
+        volume_metrics = {}
+        chart_data = {}
+        perf = {}
+        
+        # 1. Calculate trade metrics
         try:
-            # 1. Calculate trade metrics
             print("   📊 Trade metrics...", end=" ", flush=True)
             trade_calc = TradeMetricsCalculator(self.reader, strategy_name)
             trade_metrics = trade_calc.calculate()
             print("✓")
-            
-            # 2. Calculate risk metrics
+        except Exception as e:
+            print(f"✗ Failed: {e}")
+            trade_metrics = self._empty_trade_metrics()
+        
+        # 2. Calculate risk metrics
+        try:
             print("   ⚠️  Risk metrics...", end=" ", flush=True)
             risk_calc = RiskMetricsCalculator(self.reader, strategy_name)
             risk_metrics = risk_calc.calculate()
             print("✓")
-            
-            # 3. Calculate drawdown metrics
+        except Exception as e:
+            print(f"✗ Failed: {e}")
+            risk_metrics = self._empty_risk_metrics()
+        
+        # 3. Calculate drawdown metrics
+        try:
             print("   📉 Drawdown analysis...", end=" ", flush=True)
             dd_calc = DrawdownMetricsCalculator(self.reader, strategy_name)
             dd_results = dd_calc.calculate()
             dd_metrics = dd_results['metrics']
             dd_periods = dd_results['periods']
             print("✓")
-            
-            # 4. Calculate streak metrics
+        except Exception as e:
+            print(f"✗ Failed: {e}")
+            dd_metrics = {'max_drawdown_pct': 0, 'max_drawdown_dollars': 0, 'avg_drawdown_pct': 0}
+            dd_periods = []
+        
+        # 4. Calculate streak metrics
+        try:
             print("   🎯 Streak analysis...", end=" ", flush=True)
             streak_calc = StreakMetricsCalculator(self.reader, strategy_name)
             streak_results = streak_calc.calculate()
             streak_metrics = streak_results['metrics']
             streak_periods = streak_results['streaks']
             print("✓")
-            
-            # 5. Calculate monthly metrics
+        except Exception as e:
+            print(f"✗ Failed: {e}")
+            streak_metrics = {'max_win_streak': 0, 'max_loss_streak': 0, 'current_streak': 0}
+            streak_periods = []
+        
+        # 5. Calculate monthly metrics
+        try:
             print("   📅 Monthly returns...", end=" ", flush=True)
             monthly_calc = MonthlyMetricsCalculator(self.reader, strategy_name)
             monthly_data = monthly_calc.calculate()
             print("✓")
-            
-            # 6. Calculate volume metrics
+        except Exception as e:
+            print(f"✗ Failed: {e}")
+            monthly_data = {}
+        
+        # 6. Calculate volume metrics
+        try:
             print("   📊 Volume analysis...", end=" ", flush=True)
             volume_calc = VolumeMetricsCalculator(self.reader, strategy_name)
             volume_metrics = volume_calc.calculate()
             print("✓")
-            
-            # 7. Pre-compute charts
+        except Exception as e:
+            print(f"✗ Failed: {e}")
+            volume_metrics = {}
+        
+        # 7. Pre-compute charts
+        try:
             print("   📈 Chart preprocessing...", end=" ", flush=True)
             chart_proc = ChartProcessor(self.reader, strategy_name)
             chart_data = chart_proc.process_all()
             print("✓")
-            
-            # 8. Get portfolio metrics from simulation
+        except Exception as e:
+            print(f"✗ Failed: {e}")
+            chart_data = {}
+        
+        # 8. Get portfolio metrics from simulation
+        try:
             print("   💼 Portfolio metrics...", end=" ", flush=True)
             perf = self.reader.get_strategy_performance(strategy_name)
             print("✓")
-            
-            # Combine all metrics for strategy_summary table
+        except Exception as e:
+            print(f"✗ Failed: {e}")
+            perf = {}
+        
+        # Combine all metrics for strategy_summary table
+        try:
             summary_metrics = self._combine_metrics(
                 trade_metrics, risk_metrics, dd_metrics, 
                 streak_metrics, perf, timestamp
             )
-            
-            # Write to database
-            print("   💾 Writing to database...", end=" ", flush=True)
-            self._write_strategy_summary(strategy_name, summary_metrics)
-            self._write_monthly_returns(strategy_name, monthly_data)
-            self._write_drawdown_periods(strategy_name, dd_periods)
-            self._write_streak_periods(strategy_name, streak_periods)
-            self._write_volume_analysis(strategy_name, volume_metrics)
-            self._write_chart_cache(strategy_name, chart_data)
-            self._write_returns_distribution(strategy_name)
-            self._write_stock_performance(strategy_name)
-            print("✓")
-            
-            self.conn.commit()
-            
-            print(f"   ✅ {strategy_name} complete")
-            
         except Exception as e:
-            print(f"\n   ❌ Error analyzing {strategy_name}: {e}")
-            import traceback
-            traceback.print_exc()
-    
+            print(f"   ⚠️  Warning: Failed to combine metrics: {e}")
+            return
+        
+        # Write to database with error handling
+        print("   💾 Writing to database...", end=" ", flush=True)
+        
+        try:
+            self._write_strategy_summary(strategy_name, summary_metrics)
+        except Exception as e:
+            print(f"\n   ⚠️  Failed to write summary: {e}")
+        
+        try:
+            self._write_monthly_returns(strategy_name, monthly_data)
+        except Exception as e:
+            print(f"\n   ⚠️  Failed to write monthly returns: {e}")
+        
+        try:
+            self._write_drawdown_periods(strategy_name, dd_periods)
+        except Exception as e:
+            print(f"\n   ⚠️  Failed to write drawdown periods: {e}")
+        
+        try:
+            self._write_streak_periods(strategy_name, streak_periods)
+        except Exception as e:
+            print(f"\n   ⚠️  Failed to write streak periods: {e}")
+        
+        try:
+            self._write_volume_analysis(strategy_name, volume_metrics)
+        except Exception as e:
+            print(f"\n   ⚠️  Failed to write volume analysis: {e}")
+        
+        try:
+            self._write_chart_cache(strategy_name, chart_data)
+        except Exception as e:
+            print(f"\n   ⚠️  Failed to write chart cache: {e}")
+        
+        try:
+            self._write_returns_distribution(strategy_name)
+        except Exception as e:
+            print(f"\n   ⚠️  Failed to write returns distribution: {e}")
+        
+        try:
+            self._write_stock_performance(strategy_name)
+        except Exception as e:
+            print(f"\n   ⚠️  Failed to write stock performance: {e}")
+        
+        print("✓")
+        
+        try:
+            self.conn.commit()
+            print(f"   ✅ {strategy_name} complete")
+        except Exception as e:
+            print(f"   ⚠️  Commit failed: {e}")
+
     def _combine_metrics(self, trade_metrics, risk_metrics, dd_metrics, 
                         streak_metrics, perf, timestamp):
         """Combine all metrics into strategy_summary format"""
@@ -456,8 +544,10 @@ class AnalysisEngine:
             chart_id = f"{strategy_name}_{chart_type}"
             
             try:
+                # Clean data to remove NaN and Inf values
+                cleaned_data = self._clean_json_data(data)
                 # Ensure JSON is UTF-8 encoded
-                chart_json = json.dumps(data, ensure_ascii=False)
+                chart_json = json.dumps(cleaned_data, ensure_ascii=False)
                 # Double-check encoding
                 chart_json = chart_json.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
             except Exception as e:
@@ -543,6 +633,128 @@ class AnalysisEngine:
                 0   # avg_volume_ratio - would need to calculate
             ))
     
+    def _empty_trade_metrics(self):
+        """Return empty trade metrics"""
+        return {
+            'total_trades': 0, 'completed_trades': 0, 'open_positions': 0,
+            'winning_trades': 0, 'losing_trades': 0, 'win_rate_pct': 0,
+            'gross_profit': 0, 'gross_loss': 0, 'net_profit': 0,
+            'avg_win_dollars': 0, 'avg_loss_dollars': 0, 'avg_trade_dollars': 0,
+            'best_trade_dollars': 0, 'worst_trade_dollars': 0,
+            'best_trade_pct': 0, 'worst_trade_pct': 0,
+            'profit_factor': 0, 'risk_reward_ratio': 0, 'expectancy_dollars': 0,
+            'avg_hold_days': 0, 'max_hold_days': 0, 'min_hold_days': 0,
+            'median_return_pct': 0, 'return_std_dev': 0
+        }
+    
+    def _empty_risk_metrics(self):
+        """Return empty risk metrics"""
+        return {
+            'volatility_annual_pct': 0, 'downside_deviation_pct': 0,
+            'sharpe_ratio': 0, 'sortino_ratio': 0, 'calmar_ratio': 0,
+            'omega_ratio': 0, 'treynor_ratio': None,
+            'var_95_pct': 0, 'var_99_pct': 0,
+            'cvar_95_pct': 0, 'cvar_99_pct': 0,
+            'beta': None, 'alpha_pct': None, 'correlation': None,
+            'information_ratio': None, 'skewness': 0, 'kurtosis': 0
+        }
+    
+    def _clean_json_data(self, obj):
+        """
+        Recursively clean data structures to remove NaN/Inf values
+        that can't be JSON serialized
+        """
+        import math
+        
+        if isinstance(obj, dict):
+            return {k: self._clean_json_data(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._clean_json_data(v) for v in obj]
+        elif isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        else:
+            return obj
+    
+    def _analyze_benchmark(self):
+        """Analyze SPY benchmark for comparison"""
+        print(f"\n📊 Analyzing SPY benchmark...")
+        
+        try:
+            # Try to get SPY data from simulation database
+            spy_trades = self.reader.get_closed_trades('SPY')
+            
+            if spy_trades.empty:
+                print("   ⚠️  No SPY trade data available")
+                return
+            
+            # Get portfolio history for SPY
+            try:
+                spy_portfolio = self.reader.get_portfolio_history('SPY')
+                if spy_portfolio.empty:
+                    print("   ⚠️  No SPY portfolio data available")
+                    return
+            except Exception:
+                print("   ⚠️  Could not load SPY portfolio data")
+                return
+            
+            # Create minimal summary for SPY
+            initial = spy_portfolio['portfolio_value'].iloc[0]
+            final = spy_portfolio['portfolio_value'].iloc[-1]
+            total_return = ((final - initial) / initial * 100) if initial > 0 else 0
+            
+            # Store SPY summary for comparison
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO strategy_summary (
+                    strategy_name, total_return_pct, total_profit_dollars,
+                    annualized_return_pct, total_trades, completed_trades,
+                    winning_trades, losing_trades, win_rate_pct,
+                    sharpe_ratio, sortino_ratio, calmar_ratio, max_drawdown_pct
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                'SPY',
+                total_return,
+                final - initial,
+                total_return * 0.2,  # Approximate annualized
+                len(spy_trades),
+                len(spy_trades),  # All trades are closed for benchmark
+                len(spy_trades[spy_trades['profit_loss_pct'] > 0]),
+                len(spy_trades[spy_trades['profit_loss_pct'] < 0]),
+                len(spy_trades[spy_trades['profit_loss_pct'] > 0]) / len(spy_trades) * 100 if len(spy_trades) > 0 else 0,
+                0, 0, 0,  # Risk metrics placeholder
+                spy_portfolio['portfolio_value'].min() / spy_portfolio['portfolio_value'].max() - 1 * 100
+            ))
+            
+            # Store SPY chart data
+            processor = ChartProcessor(self.reader, 'SPY')
+            try:
+                chart_data = processor.process_all()
+                timestamp = int(time.time())
+                
+                for chart_type, data in chart_data.items():
+                    chart_id = f"SPY_{chart_type}"
+                    try:
+                        cleaned_data = self._clean_json_data(data)
+                        chart_json = json.dumps(cleaned_data, ensure_ascii=False)
+                    except:
+                        continue
+                    
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO chart_cache
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (chart_id, 'SPY', chart_type, chart_json, timestamp))
+            except Exception as e:
+                print(f"   ⚠️  Could not cache SPY charts: {e}")
+            
+            self.conn.commit()
+            print(f"   ✅ SPY benchmark analyzed (Return: {total_return:.2f}%)")
+            
+        except Exception as e:
+            print(f"   ⚠️  Error analyzing SPY: {e}")
+        
     def _store_metadata(self):
         """Store analysis metadata with UTF-8 safety"""
         cursor = self.conn.cursor()
@@ -558,6 +770,7 @@ class AnalysisEngine:
         
         metadata = [
             ('simulation_db', sim_db_name, timestamp),
+            ('source_simulation', sim_db_name, timestamp),  # For trades endpoint
             ('simulation_id', str(self.reader.get_simulation_id()), timestamp),
             ('universe', str(self.reader.get_universe()), timestamp),
             ('num_symbols', str(self.reader.get_num_symbols()), timestamp),

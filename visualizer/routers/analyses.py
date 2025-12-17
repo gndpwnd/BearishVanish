@@ -53,6 +53,7 @@ async def list_analyses():
         try:
             # Get metadata
             conn = sqlite3.connect(str(db_path))
+            conn.text_factory = str  # ADD THIS LINE
             cursor = conn.cursor()
             
             cursor.execute("SELECT key, value FROM analysis_metadata")
@@ -169,14 +170,17 @@ async def select_analysis(analysis_id: str):
         )
     
     try:
-        # Close old reader if exists
+        # ⭐ FIX: Close old reader properly to avoid connection leaks
         if _current_analysis_reader:
             try:
+                print(f"Closing previous analysis reader...")
                 _current_analysis_reader.close()
-            except:
-                pass
+                _current_analysis_reader = None
+            except Exception as close_error:
+                print(f"Warning: Error closing old reader: {close_error}")
         
         # Open new reader
+        print(f"Opening analysis: {analysis_id}")
         _current_analysis_reader = AnalysisReader(db_path)
         _current_analysis = analysis_id
         
@@ -187,11 +191,18 @@ async def select_analysis(analysis_id: str):
         }
     
     except Exception as e:
+        # Clean up on error
+        if _current_analysis_reader:
+            try:
+                _current_analysis_reader.close()
+            except:
+                pass
+            _current_analysis_reader = None
+        
         raise HTTPException(
             status_code=500,
             detail=f"Error selecting analysis: {str(e)}"
         )
-
 
 @router.get("/current/info")
 async def get_current_analysis_info():

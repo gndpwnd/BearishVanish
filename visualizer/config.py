@@ -28,9 +28,11 @@ class Settings(BaseSettings):
         "http://127.0.0.1:8000",
     ]
     
-    # Database Paths (relative to backend directory)
-    analysis_db_dir: Path = Path("../analysis/analysis_dbs")
-    simulation_db_dir: Path = Path("../simulator/simulations")
+    # Database Paths (use absolute paths from project root)
+    # Calculate project root (visualizer is inside BearishVanish/)
+    _project_root: Path = Path(__file__).parent.parent  # Go up from visualizer/ to BearishVanish/
+    analysis_db_dir: Path = _project_root / "analysis" / "analysis_dbs"
+    simulation_db_dir: Path = _project_root / "simulator" / "simulations"
     
     # Cache Settings
     enable_cache: bool = True

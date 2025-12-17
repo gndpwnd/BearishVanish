@@ -59,23 +59,30 @@ class RiskMetricsCalculator(BaseCalculator):
         return metrics
     
     def _annualized_volatility(self, returns):
-        """Calculate annualized volatility"""
-        return returns.std() * np.sqrt(252 * 6.5) * 100
+        """Calculate annualized volatility with correct factor"""
+        # For 6-hour bars: 6.5 trading hours / 6 hours per bar
+        bars_per_day = 6.5 / 6.0  # ~1.08 bars per day
+        bars_per_year = bars_per_day * 252
+        return returns.std() * np.sqrt(bars_per_year) * 100
     
     def _downside_deviation(self, returns, target=0.0):
         """Calculate downside deviation (semi-deviation)"""
         downside = returns[returns < target]
         if len(downside) == 0:
             return 0
-        return np.sqrt(np.mean(downside ** 2)) * np.sqrt(252 * 6.5) * 100
+        bars_per_day = 6.5 / 6.0
+        bars_per_year = bars_per_day * 252
+        return np.sqrt(np.mean(downside ** 2)) * np.sqrt(bars_per_year) * 100
     
     def _sharpe_ratio(self, returns, risk_free_rate=0.0):
         """Calculate Sharpe ratio"""
         excess_returns = returns - (risk_free_rate / 252 / 6.5)
         if excess_returns.std() == 0:
             return 0
+        bars_per_day = 6.5 / 6.0
+        bars_per_year = bars_per_day * 252
         sharpe = excess_returns.mean() / excess_returns.std()
-        return sharpe * np.sqrt(252 * 6.5)
+        return sharpe * np.sqrt(bars_per_year)
     
     def _sortino_ratio(self, returns, target_return=0.0):
         """Calculate Sortino ratio"""
@@ -84,9 +91,11 @@ class RiskMetricsCalculator(BaseCalculator):
         
         if downside_dev == 0:
             return 0
-        
+
+        bars_per_day = 6.5 / 6.0
+        bars_per_year = bars_per_day * 252
         sortino = excess_returns.mean() / downside_dev
-        return sortino * np.sqrt(252 * 6.5)
+        return sortino * np.sqrt(bars_per_year)
     
     def _calmar_ratio(self):
         """Calculate Calmar ratio"""
@@ -139,9 +148,19 @@ class RiskMetricsCalculator(BaseCalculator):
         
         return abs(tail_losses.mean()) * 100
     
-    def _calculate_beta(self):
-        """Calculate beta vs benchmark"""
-        benchmark_portfolio = self.reader.get_portfolio_history('SPY')
+    def _calculate_beta(self, benchmark='SPY'):
+        """Calculate beta vs benchmark with fallback"""
+        # Try specified benchmark
+        benchmark_portfolio = self.reader.get_portfolio_history(benchmark)
+        
+        # Fallback to other common benchmarks if SPY not available
+        if benchmark_portfolio.empty:
+            for alt_benchmark in ['QQQ', 'DIA', 'VTI', 'IWM']:
+                benchmark_portfolio = self.reader.get_portfolio_history(alt_benchmark)
+                if not benchmark_portfolio.empty:
+                    # Successfully found alternative benchmark
+                    break
+        
         if benchmark_portfolio.empty:
             return None
         
@@ -164,7 +183,7 @@ class RiskMetricsCalculator(BaseCalculator):
         bench_variance = bench_rets.var()
         
         return covariance / bench_variance
-    
+
     def _calculate_alpha(self):
         """Calculate Jensen's alpha"""
         beta = self._calculate_beta()
@@ -173,7 +192,16 @@ class RiskMetricsCalculator(BaseCalculator):
         
         portfolio_return = self.performance.get('total_return_pct', 0)
         
+        # Try to find benchmark performance
         benchmark_perf = self.reader.get_strategy_performance('SPY')
+        
+        # Fallback to other benchmarks
+        if not benchmark_perf:
+            for alt in ['QQQ', 'DIA', 'VTI', 'IWM']:
+                benchmark_perf = self.reader.get_strategy_performance(alt)
+                if benchmark_perf:
+                    break
+        
         if not benchmark_perf:
             return None
         
@@ -185,7 +213,16 @@ class RiskMetricsCalculator(BaseCalculator):
     
     def _calculate_correlation(self):
         """Calculate correlation with benchmark"""
+        # Try SPY first
         benchmark_portfolio = self.reader.get_portfolio_history('SPY')
+        
+        # Fallback to alternatives
+        if benchmark_portfolio.empty:
+            for alt in ['QQQ', 'DIA', 'VTI', 'IWM']:
+                benchmark_portfolio = self.reader.get_portfolio_history(alt)
+                if not benchmark_portfolio.empty:
+                    break
+        
         if benchmark_portfolio.empty:
             return None
         
@@ -200,7 +237,16 @@ class RiskMetricsCalculator(BaseCalculator):
     
     def _information_ratio(self):
         """Calculate information ratio"""
+        # Try SPY first
         benchmark_portfolio = self.reader.get_portfolio_history('SPY')
+        
+        # Fallback to alternatives
+        if benchmark_portfolio.empty:
+            for alt in ['QQQ', 'DIA', 'VTI', 'IWM']:
+                benchmark_portfolio = self.reader.get_portfolio_history(alt)
+                if not benchmark_portfolio.empty:
+                    break
+        
         if benchmark_portfolio.empty:
             return None
         
@@ -220,8 +266,10 @@ class RiskMetricsCalculator(BaseCalculator):
         if tracking_error == 0:
             return None
         
+        bars_per_day = 6.5 / 6.0
+        bars_per_year = bars_per_day * 252
         ir = excess_returns.mean() / tracking_error
-        return ir * np.sqrt(252 * 6.5)
+        return ir * np.sqrt(bars_per_year)
     
     def _treynor_ratio(self, returns):
         """Calculate Treynor ratio"""
@@ -229,9 +277,11 @@ class RiskMetricsCalculator(BaseCalculator):
         if beta is None or beta == 0:
             return None
         
-        excess_returns = returns - (0.0 / 252 / 6.5)  # risk_free = 0
+        bars_per_day = 6.5 / 6.0
+        bars_per_year = bars_per_day * 252
+        excess_returns = returns - (0.0 / bars_per_year)  # risk_free = 0
         treynor = excess_returns.mean() / beta
-        return treynor * (252 * 6.5)
+        return treynor * bars_per_year
     
     def _empty_metrics(self):
         """Return empty metrics structure"""

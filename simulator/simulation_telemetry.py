@@ -18,107 +18,10 @@ from pathlib import Path
 import hashlib
 import time
 
+# Import shared UTF-8 utilities
+from utilities.utf8_helpers import ensure_utf8, sanitize_json, get_utf8_connection
+
 TELEMETRY_ROOT = Path('./simulations')
-
-# ============================================================
-# UTF-8 SAFETY HELPERS
-# ============================================================
-
-def ensure_utf8(text):
-    """
-    Ensure a string is valid UTF-8
-    
-    Args:
-        text: Input string (can be str, bytes, or None)
-    
-    Returns:
-        UTF-8 encoded string or None
-    """
-    if text is None:
-        return None
-    
-    if isinstance(text, bytes):
-        # Try to decode bytes
-        try:
-            return text.decode('utf-8', errors='replace')
-        except:
-            return text.decode('latin-1', errors='replace')
-    
-    if not isinstance(text, str):
-        text = str(text)
-    
-    # Ensure string is valid UTF-8 by encoding and decoding
-    try:
-        # This will catch any encoding issues
-        text.encode('utf-8')
-        return text
-    except UnicodeEncodeError:
-        # Replace problematic characters
-        return text.encode('utf-8', errors='replace').decode('utf-8')
-
-def sanitize_json(data):
-    """
-    Sanitize data before JSON serialization to ensure UTF-8 compatibility
-    
-    Args:
-        data: Dictionary or object to serialize
-    
-    Returns:
-        JSON string with UTF-8 safe encoding
-    """
-    if data is None:
-        return None
-    
-    try:
-        # First attempt: normal serialization
-        return json.dumps(data, ensure_ascii=False)
-    except (TypeError, ValueError, UnicodeDecodeError):
-        # Second attempt: sanitize the data
-        if isinstance(data, dict):
-            sanitized = {
-                ensure_utf8(k): sanitize_value(v) 
-                for k, v in data.items()
-            }
-        else:
-            sanitized = sanitize_value(data)
-        
-        try:
-            return json.dumps(sanitized, ensure_ascii=False)
-        except:
-            # Final fallback: ASCII-only encoding
-            return json.dumps(sanitized, ensure_ascii=True)
-
-def sanitize_value(value):
-    """Recursively sanitize values for JSON"""
-    if value is None:
-        return None
-    elif isinstance(value, (str, bytes)):
-        return ensure_utf8(value)
-    elif isinstance(value, dict):
-        return {ensure_utf8(k): sanitize_value(v) for k, v in value.items()}
-    elif isinstance(value, (list, tuple)):
-        return [sanitize_value(v) for v in value]
-    elif isinstance(value, (int, float, bool)):
-        return value
-    else:
-        return ensure_utf8(str(value))
-
-def get_utf8_connection(db_path):
-    """
-    Create SQLite connection with UTF-8 encoding
-    
-    Args:
-        db_path: Path to database file
-    
-    Returns:
-        sqlite3.Connection with UTF-8 settings
-    """
-    conn = sqlite3.connect(db_path)
-    conn.text_factory = str  # Ensure strings are returned as str
-    # Set UTF-8 encoding
-    conn.execute("PRAGMA encoding = 'UTF-8'")
-    return conn
-
 
 class SimulationTelemetry:
     """
@@ -341,15 +244,20 @@ class SimulationTelemetry:
         ''')
         
         # Indexes for performance
-        cursor.execute('CREATE INDEX idx_trades_strategy ON trade_history(strategy_name, trade_status)')
-        cursor.execute('CREATE INDEX idx_trades_symbol ON trade_history(symbol)')
-        cursor.execute('CREATE INDEX idx_trades_entry_ts ON trade_history(entry_timestamp)')
-        cursor.execute('CREATE INDEX idx_trades_volume ON trade_history(entry_relative_volume, exit_relative_volume)')
-        cursor.execute('CREATE INDEX idx_portfolio_strategy ON portfolio_history(strategy_name, timestamp)')
-        cursor.execute('CREATE INDEX idx_attempts_strategy ON trade_attempts(strategy_name, success)')
-        cursor.execute('CREATE INDEX idx_attempts_volume ON trade_attempts(relative_volume, success)')
-        cursor.execute('CREATE INDEX idx_execution_strategy ON execution_log(strategy_name, timestamp)')
-        cursor.execute('CREATE INDEX idx_indicator_history ON indicator_history(strategy_name, symbol, indicator_name)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trade_history(strategy_name, trade_status)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trade_history(symbol)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_entry_ts ON trade_history(entry_timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trades_volume ON trade_history(entry_relative_volume, exit_relative_volume)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_portfolio_strategy ON portfolio_history(strategy_name, timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_attempts_strategy ON trade_attempts(strategy_name, success)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_attempts_volume ON trade_attempts(relative_volume, success)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_execution_strategy ON execution_log(strategy_name, timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_indicator_history ON indicator_history(strategy_name, symbol, indicator_name)')
+        
+        # Additional performance indexes
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trade_history_strategy ON trade_history(strategy_name, trade_status)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_trade_attempts_strategy ON trade_attempts(strategy_name, success)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_portfolio_strategy_time ON portfolio_history(strategy_name, timestamp)')
         
         conn.commit()
         conn.close()

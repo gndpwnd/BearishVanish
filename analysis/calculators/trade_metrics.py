@@ -71,25 +71,25 @@ class TradeMetricsCalculator(BaseCalculator):
         return metrics
     
     def _calculate_profit_factor(self, wins, losses):
-        """Calculate profit factor"""
+        """Calculate profit factor (SQLite-safe)"""
         gross_profit = wins['profit_loss_dollars'].sum() if not wins.empty else 0
         gross_loss = abs(losses['profit_loss_dollars'].sum()) if not losses.empty else 0
         
         if gross_loss == 0:
-            return float('inf') if gross_profit > 0 else 0
+            return 999999.0 if gross_profit > 0 else 0  # SQLite-safe large number
         
         return gross_profit / gross_loss
     
     def _calculate_risk_reward(self, wins, losses):
-        """Calculate risk/reward ratio"""
+        """Calculate risk/reward ratio (SQLite-safe)"""
         avg_win = wins['profit_loss_dollars'].mean() if not wins.empty else 0
         avg_loss = abs(losses['profit_loss_dollars'].mean()) if not losses.empty else 0
         
         if avg_loss == 0:
-            return float('inf') if avg_win > 0 else 0
+            return 999999.0 if avg_win > 0 else 0  # SQLite-safe large number
         
         return avg_win / avg_loss
-    
+
     def _calculate_expectancy(self, wins, losses, total_trades):
         """Calculate expectancy per trade"""
         if total_trades == 0:

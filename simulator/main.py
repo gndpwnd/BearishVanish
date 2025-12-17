@@ -315,7 +315,7 @@ def main():
         print(f"{'='*70}")
         
         db_path, speedup = test_performance_improvement(
-            strategies, symbols, data_manager, args
+            strategies, symbols, data_manager, universe_manager, args
         )
         
         if speedup > 3:

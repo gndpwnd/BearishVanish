@@ -170,10 +170,9 @@ CREATE INDEX IF NOT EXISTS idx_stock_perf_strategy ON stock_performance_cache(st
 CREATE INDEX IF NOT EXISTS idx_chart_strategy ON chart_cache(strategy_name, chart_type);
 """
 
-
 def create_analysis_database(db_path):
     """
-    Create analysis database with schema
+    Create analysis database with schema and UTF-8 safety
     
     Args:
         db_path: Path to create database
@@ -181,6 +180,10 @@ def create_analysis_database(db_path):
     import sqlite3
     
     conn = sqlite3.connect(db_path)
+    # Add UTF-8 safety
+    conn.text_factory = str
+    conn.execute("PRAGMA encoding = 'UTF-8'")
+    
     conn.executescript(ANALYSIS_SCHEMA)
     conn.commit()
     conn.close()

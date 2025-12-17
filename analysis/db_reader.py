@@ -57,6 +57,15 @@ class SimulationReader:
             # Table might not exist in older databases
             pass
     
+    def _table_exists(self, table_name):
+        """Check if a table exists in the database"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,)
+        )
+        return cursor.fetchone() is not None
+
     def get_metadata(self):
         """Get simulation metadata"""
         return self._metadata.copy()
@@ -110,6 +119,10 @@ class SimulationReader:
         Returns:
             DataFrame: All trades (including open positions)
         """
+        # Check if table exists
+        if not self._table_exists('trade_history'):
+            return pd.DataFrame()
+        
         query = """
             SELECT * FROM trade_history 
             WHERE strategy_name = ?

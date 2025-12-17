@@ -30,17 +30,27 @@ class MonthlyMetricsCalculator(BaseCalculator):
         # Calculate daily returns
         returns_series = portfolio['portfolio_value'].pct_change()
         
-        # Group by month and calculate monthly returns
-        monthly_returns = returns_series.groupby(pd.Grouper(freq='ME')).apply(
-            lambda x: (1 + x).prod() - 1
-        ) * 100
+        # Group by month and calculate monthly returns (pandas version compatible)
+        try:
+            # Try newer pandas (2.0+) which uses 'ME' for month end
+            monthly_returns = returns_series.groupby(pd.Grouper(freq='ME')).apply(
+                lambda x: (1 + x).prod() - 1
+            ) * 100
+        except ValueError:
+            # Fallback for older pandas which uses 'M'
+            monthly_returns = returns_series.groupby(pd.Grouper(freq='M')).apply(
+                lambda x: (1 + x).prod() - 1
+            ) * 100
         
         monthly_returns = monthly_returns.dropna()
         
         # Get trade counts per month
         if not self.closed_trades.empty:
             self.closed_trades['entry_date'] = pd.to_datetime(self.closed_trades['entry_date'])
-            trades_by_month = self.closed_trades.set_index('entry_date').groupby(pd.Grouper(freq='ME'))
+            try:
+                trades_by_month = self.closed_trades.set_index('entry_date').groupby(pd.Grouper(freq='ME'))
+            except ValueError:
+                trades_by_month = self.closed_trades.set_index('entry_date').groupby(pd.Grouper(freq='M'))
         else:
             trades_by_month = None
         
