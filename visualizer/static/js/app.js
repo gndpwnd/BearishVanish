@@ -141,9 +141,29 @@ const Dashboard = ({ analysisId }) => {
                                 <option key={s} value={s}>{s}</option>
                             ))}
                         </select>
+
+                        {/* Download Report Button */}
+                        {currentStrategy && (
+                            <button
+                                onClick={async () => {
+                                    try {
+                                        const blob = await api.downloadReport(currentStrategy, 'full');
+                                        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+                                        const filename = `${currentStrategy.replace(/\s+/g, '_')}_${timestamp}.md`;
+                                        downloadFile(blob, filename);
+                                    } catch (err) {
+                                        alert(`Failed to download report: ${err.message}`);
+                                    }
+                                }}
+                                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium flex items-center space-x-2"
+                            >
+                                <span>📥</span>
+                                <span>Download Report</span>
+                            </button>
+                        )}
                         
                         {metrics && (
-                            <div className="flex space-x-6 ml-8 text-sm">
+                            <div className="flex space-x-6 ml-auto text-sm">
                                 <span className="text-gray-600">
                                     Return: <strong className={metrics.total_return_pct >= 0 ? 'text-green-600' : 'text-red-600'}>
                                         {formatPercent(metrics.total_return_pct)}

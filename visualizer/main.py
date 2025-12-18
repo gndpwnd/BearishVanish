@@ -12,7 +12,7 @@ from pathlib import Path
 
 from config import settings, discover_analysis_databases, discover_simulation_databases
 from models.responses import ErrorResponse, HealthCheck
-from routers import analyses, strategies, trades, charts, comparison
+from routers import analyses, strategies, trades, charts, comparison, reports
 
 
 # ============================================================================
@@ -163,6 +163,12 @@ app.include_router(
     comparison.router,
     prefix="/api/compare",
     tags=["Comparison"]
+)
+
+app.include_router(
+    reports.router,
+    prefix="/api/v1/reports",
+    tags=["Reports"]
 )
 
 

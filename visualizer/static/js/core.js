@@ -122,6 +122,34 @@ const api = {
 
     // Comparison
     compareAll: () => api.get('/compare'),
+
+    // Reports
+    downloadReport: async (strategyName, reportType = 'full') => {
+        try {
+            const endpoint = `/v1/reports/${encodeURIComponent(strategyName)}/download?report_type=${reportType}`;
+            const response = await fetch(`${CONFIG.API_BASE}${endpoint}`);
+            if (!response.ok) {
+                throw new Error('Failed to download report');
+            }
+            return response.blob();
+        } catch (error) {
+            throw new Error(`Error downloading report: ${error.message}`);
+        }
+    }
+};
+
+// ===================================================================
+// Download Helper Function
+// ===================================================================
+const downloadFile = (blob, filename) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
 };
 
 // ===================================================================
