@@ -364,6 +364,7 @@ class AnalysisEngine:
             # Basic Performance
             'total_return_pct': total_return_pct,
             'total_profit_dollars': final_value - initial_capital,
+            'unrealized_pnl': perf.get('unrealized_pnl', 0.0) if perf else 0.0,
             'annualized_return_pct': annualized_return,
             
             # Trade Statistics
