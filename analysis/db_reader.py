@@ -212,6 +212,37 @@ class SimulationReader:
             df['win_rate_pct'] = (df['winning_trades'] / df['total_trades'] * 100).fillna(0)
         
         return df
+
+    def get_latest_price_for_symbol(self, symbol):
+        """
+        Get the latest observed price for a symbol from trade_attempts or trade_history
+        Returns:
+            float or None
+        """
+        cursor = self.conn.cursor()
+        # Try trade_attempts first (captures signal prices)
+        cursor.execute(
+            "SELECT price FROM trade_attempts WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+            (symbol,)
+        )
+        row = cursor.fetchone()
+        if row and row[0] is not None:
+            try:
+                return float(row[0])
+            except Exception:
+                pass
+        # Fallback: look in trade_history for latest entry/exit price
+        cursor.execute(
+            "SELECT COALESCE(exit_price, entry_price) as price FROM trade_history WHERE symbol = ? ORDER BY COALESCE(exit_timestamp, entry_timestamp) DESC LIMIT 1",
+            (symbol,)
+        )
+        row = cursor.fetchone()
+        if row and row[0] is not None:
+            try:
+                return float(row[0])
+            except Exception:
+                pass
+        return None
     
     def get_trade_attempts(self, strategy_name):
         """

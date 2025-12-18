@@ -241,7 +241,43 @@ class AnalysisEngine:
         try:
             print("   💼 Portfolio metrics...", end=" ", flush=True)
             perf = self.reader.get_strategy_performance(strategy_name)
-            print("✓")
+
+            # Calculate unrealized P&L from any open positions (mark-to-market)
+            try:
+                open_positions_df = self.reader.get_open_positions(strategy_name)
+                unrealized_pnl = 0.0
+                if not open_positions_df.empty:
+                    for idx, row in open_positions_df.iterrows():
+                        try:
+                            shares = float(row.get('shares', 0) or 0)
+                            entry_price = float(row.get('entry_price', 0) or 0)
+                            symbol = row.get('symbol')
+                            if shares and symbol:
+                                latest_price = self.reader.get_latest_price_for_symbol(symbol)
+                                if latest_price is None:
+                                    # If we cannot find a more recent market price, fallback to entry_price (0 unrealized)
+                                    continue
+                                pnl = (latest_price - entry_price) * shares
+                                unrealized_pnl += pnl
+                        except Exception:
+                            continue
+                # Attach unrealized info to perf for downstream use
+                perf['unrealized_pnl'] = unrealized_pnl
+
+                # If perf contains final_value, adjust it to include unrealized pnl
+                if 'final_value' in perf and perf['final_value'] is not None:
+                    perf['final_value'] = perf.get('final_value', 0) + unrealized_pnl
+                else:
+                    # If final_value missing, attempt to compute from portfolio history last record
+                    portfolio = self.reader.get_portfolio_history(strategy_name)
+                    if not portfolio.empty:
+                        last_port = portfolio.iloc[-1]
+                        base_final = float(last_port.get('portfolio_value', 0) or 0)
+                        perf['final_value'] = base_final + unrealized_pnl
+
+                print(f"✓ (unrealized_pnl=${unrealized_pnl:.2f})")
+            except Exception as e:
+                print(f"✓ (unrealized calc failed: {e})")
         except Exception as e:
             print(f"✗ Failed: {e}")
             perf = {}
@@ -314,9 +350,10 @@ class AnalysisEngine:
         # Get basic portfolio metrics
         initial_capital = perf.get('initial_capital', 100000) if perf else 100000
         final_value = perf.get('final_value', initial_capital) if perf else initial_capital
-        total_return_pct = perf.get('total_return_pct', 0) if perf else 0
+        # Recompute total return percentage using adjusted final_value (includes unrealized P&L)
+        total_return_pct = ((final_value - initial_capital) / initial_capital * 100) if initial_capital else 0
         
-        # Calculate annualized return
+        # Calculate annualized return using recomputed total_return_pct
         days = len(self.reader.get_portfolio_history(self.reader.list_strategies()[0]))
         if days > 0:
             annualized_return = ((total_return_pct / 100 + 1) ** (252 / days) - 1) * 100
