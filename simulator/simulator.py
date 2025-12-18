@@ -815,25 +815,17 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
             for perf in all_stock_performance:
                 cursor.execute('''
                     INSERT OR REPLACE INTO stock_performance
-                    (strategy_name, symbol, num_trades, num_buys, num_sells,
-                     total_invested, total_returned, pnl, pnl_pct, win_rate,
-                     winning_trades, losing_trades, current_shares, created_timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (strategy_name, symbol, total_trades, winning_trades, losing_trades,
+                     net_profit_loss, win_rate_pct)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     perf['strategy_name'],
                     perf['symbol'],
-                    perf['num_trades'],
-                    perf['num_buys'],
-                    perf['num_sells'],
-                    perf['total_invested'],
-                    perf['total_returned'],
-                    perf['pnl'],
-                    perf['pnl_pct'],
-                    perf['win_rate'],
-                    perf['wins'],
-                    perf['losses'],
-                    perf['current_shares'],
-                    int(time.time())
+                    perf.get('num_trades', 0),
+                    perf.get('wins', 0),
+                    perf.get('losses', 0),
+                    perf.get('pnl', 0.0),
+                    perf.get('win_rate', 0.0)
                 ))
             
             conn.commit()
