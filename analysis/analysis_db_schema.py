@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS strategy_summary (
     -- Basic Performance
     total_return_pct REAL,
     total_profit_dollars REAL,
+    unrealized_pnl REAL,
     annualized_return_pct REAL,
     
     -- Trade Statistics

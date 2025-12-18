@@ -426,7 +426,7 @@ class AnalysisEngine:
         
         cursor.execute('''
             INSERT OR REPLACE INTO strategy_summary (
-                strategy_name, total_return_pct, total_profit_dollars, annualized_return_pct,
+                strategy_name, total_return_pct, total_profit_dollars, unrealized_pnl, annualized_return_pct,
                 total_trades, completed_trades, open_positions, winning_trades, losing_trades, win_rate_pct,
                 gross_profit, gross_loss, profit_factor, avg_win_dollars, avg_loss_dollars,
                 risk_reward_ratio, expectancy_dollars, sharpe_ratio, sortino_ratio, calmar_ratio,
@@ -438,11 +438,12 @@ class AnalysisEngine:
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             strategy_name,
             metrics['total_return_pct'],
             metrics['total_profit_dollars'],
+            metrics.get('unrealized_pnl', 0.0),
             metrics['annualized_return_pct'],
             metrics['total_trades'],
             metrics['completed_trades'],
@@ -745,16 +746,17 @@ class AnalysisEngine:
             cursor = self.conn.cursor()
             cursor.execute('''
                 INSERT OR REPLACE INTO strategy_summary (
-                    strategy_name, total_return_pct, total_profit_dollars,
+                    strategy_name, total_return_pct, total_profit_dollars, unrealized_pnl,
                     annualized_return_pct, total_trades, completed_trades,
                     winning_trades, losing_trades, win_rate_pct,
                     sharpe_ratio, sortino_ratio, calmar_ratio, max_drawdown_pct
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 'SPY',
                 total_return,
                 final - initial,
+                0.0,  # SPY benchmark has no open positions
                 total_return * 0.2,  # Approximate annualized
                 len(spy_trades),
                 len(spy_trades),  # All trades are closed for benchmark
