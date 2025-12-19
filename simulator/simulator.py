@@ -445,9 +445,14 @@ def run_single_strategy_on_symbol(strategy_name: str,
                             )
                         )
             
-            # Record daily snapshot (every 5 bars to reduce data volume)
-            if i == len(stock_data) - 1 or i % 5 == 0:
-                portfolio_value = tracker.get_current_portfolio_value({symbol: current_price})
+            # Record daily snapshot (EVERY BAR for accurate drawdown tracking)
+            if i == len(stock_data) - 1 or i % 1 == 0:
+                # FIXED: Include ALL positions in portfolio value calculation
+                # Build current prices dict with all held symbols
+                current_prices_dict = {symbol: current_price}
+                # Note: In single-symbol simulation, this is correct
+                # In multi-symbol portfolio, this would need all symbol prices
+                portfolio_value = tracker.get_current_portfolio_value(current_prices_dict)
                 cash = tracker.cash
                 num_positions = tracker.get_current_position_count()
                 

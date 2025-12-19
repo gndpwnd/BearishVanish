@@ -385,6 +385,17 @@ def calculate_stochastic(data: pd.DataFrame, period: int = 14, smooth_k: int = 3
 # INDICATOR REGISTRY
 # ============================================================
 
+# Import advanced indicators
+try:
+    from indicator_advanced import (
+        calculate_vwap, calculate_mfi, calculate_obv, calculate_adx,
+        calculate_supertrend, calculate_ichimoku, calculate_keltner_channels,
+        calculate_historical_volatility
+    )
+    ADVANCED_INDICATORS_AVAILABLE = True
+except ImportError:
+    ADVANCED_INDICATORS_AVAILABLE = False
+
 BUILTIN_FUNCTIONS = {
     'sma': calculate_sma,
     'ema': calculate_ema,
@@ -395,6 +406,19 @@ BUILTIN_FUNCTIONS = {
     'relative_volume': calculate_relative_volume,
     'stochastic': calculate_stochastic,
 }
+
+# Add advanced indicators if available
+if ADVANCED_INDICATORS_AVAILABLE:
+    BUILTIN_FUNCTIONS.update({
+        'vwap': calculate_vwap,
+        'mfi': calculate_mfi,
+        'obv': calculate_obv,
+        'adx': calculate_adx,
+        'supertrend': calculate_supertrend,
+        'ichimoku': calculate_ichimoku,
+        'keltner_channels': calculate_keltner_channels,
+        'historical_volatility': calculate_historical_volatility,
+    })
 
 BUILTIN_CLASSES = {}  # For class-based indicators
 
