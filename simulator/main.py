@@ -50,6 +50,8 @@ def parse_arguments():
     parser.add_argument('--optimize', action='store_true', help='Run system optimization')
     parser.add_argument('--test-performance', action='store_true', help='Test performance improvement')
     parser.add_argument('--benchmark', action='store_true', help='Run benchmark (deprecated, use --optimize)')
+    parser.add_argument('--sim-workers', type=int, default=None,
+                       help='Number of parallel simulation workers (default: auto, max recommended for HPC: 48-96)')
     
     return parser.parse_args()
 

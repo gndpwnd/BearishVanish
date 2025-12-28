@@ -350,8 +350,8 @@ def run_single_strategy_on_symbol(strategy_name: str,
                 else:
                     success = True
             
-            # ALWAYS RECORD trade attempt
-            timestamp = time.time()
+            # ALWAYS RECORD trade attempt - use SIMULATION time, not wall-clock
+            timestamp = int(current_date.timestamp()) if hasattr(current_date, 'timestamp') else int(pd.to_datetime(current_date).timestamp())
             trade_attempts.append(
                 create_trade_attempt_tuple(
                     timestamp, str(current_date), strategy.name, symbol, signal,
@@ -447,27 +447,21 @@ def run_single_strategy_on_symbol(strategy_name: str,
             
             # Record daily snapshot (EVERY BAR for accurate drawdown tracking)
             if i == len(stock_data) - 1 or i % 1 == 0:
-                # FIXED: Include ALL positions in portfolio value calculation
-                # Build current prices dict with all held symbols
+                # Get current portfolio value
                 current_prices_dict = {symbol: current_price}
-                # Note: In single-symbol simulation, this is correct
-                # In multi-symbol portfolio, this would need all symbol prices
                 portfolio_value = tracker.get_current_portfolio_value(current_prices_dict)
                 cash = tracker.cash
                 num_positions = tracker.get_current_position_count()
-                
-                # Calculate daily return (simplified)
+
+                # Calculate daily return based on PORTFOLIO VALUE CHANGE
+                # This is the correct method - compares today's portfolio to yesterday's
                 daily_return = 0.0
-                if i > 0:
-                    prev_price = stock_data['close'].iloc[i-1] if i > 0 else current_price
-                    if tracker.positions.get(symbol, 0) > 0:
-                        # Position return
-                        position_return = (current_price - prev_price) / prev_price
-                        position_pct = tracker.positions.get(symbol, 0) * prev_price / (
-                            tracker.get_current_portfolio_value({symbol: prev_price}) if tracker.get_current_portfolio_value({symbol: prev_price}) > 0 else 1
-                        )
-                        daily_return = position_return * position_pct
-                
+                if i > 0 and len(portfolio_snapshots) > 0:
+                    # Get previous portfolio value from last snapshot
+                    prev_portfolio_value = portfolio_snapshots[-1][3]  # Index 3 is portfolio_value
+                    if prev_portfolio_value > 0:
+                        daily_return = (portfolio_value - prev_portfolio_value) / prev_portfolio_value
+
                 portfolio_snapshots.append(
                     create_portfolio_snapshot_tuple(
                         timestamp, strategy.name, str(current_date),
@@ -499,9 +493,12 @@ def run_single_strategy_on_symbol(strategy_name: str,
                             profit_loss = trade['proceeds'] - trade['cost']
                             profit_loss_pct = (profit_loss / trade['cost']) * 100 if trade['cost'] > 0 else 0
                         
+                        # Use SIMULATION time from trade date, not wall-clock
+                        trade_date = trade['date']
+                        trade_timestamp = int(pd.to_datetime(trade_date).timestamp()) if isinstance(trade_date, str) else int(trade_date.timestamp())
                         trade_exits.append(
                             create_trade_exit_tuple(
-                                time.time(), trade['date'], trade['price'], 0,
+                                trade_timestamp, trade['date'], trade['price'], 0,
                                 0, 1.0, portfolio_value, cash, profit_loss,
                                 profit_loss_pct, 0, 0, True, "Forced liquidation",
                                 strategy.name, symbol
@@ -570,11 +567,19 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         from config_optimizer import load_optimization_config
         opt_config = load_optimization_config()
         use_numba = opt_config.get('use_numba', True)
-        parallel_workers = opt_config.get('parallel_workers', {}).get('simulation', max(1, mp.cpu_count() - 2))
+        auto_workers = opt_config.get('parallel_workers', {}).get('simulation', max(1, mp.cpu_count() - 2))
     except ImportError:
         # Default settings
         use_numba = True
-        parallel_workers = max(1, mp.cpu_count() - 2)
+        auto_workers = max(1, mp.cpu_count() - 2)
+
+    # Allow command-line override for HPC usage
+    # Recommended: 48-96 for HPC with 192 cores (avoid memory overhead)
+    if hasattr(args, 'sim_workers') and args.sim_workers is not None:
+        parallel_workers = args.sim_workers
+        print(f"   Using user-specified workers: {parallel_workers}")
+    else:
+        parallel_workers = auto_workers
     
     print(f"\n{'='*70}")
     print("OPTIMIZED SIMULATION ENGINE WITH TELEMETRY")

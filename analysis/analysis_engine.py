@@ -241,7 +241,24 @@ class AnalysisEngine:
         try:
             print("   💼 Portfolio metrics...", end=" ", flush=True)
             perf = self.reader.get_strategy_performance(strategy_name)
-            perf['unrealized_pnl'] = 0.0  # For completed simulations, unrealized is always 0
+
+            # Calculate unrealized P&L from open positions
+            # If there are open trades, they contribute to unrealized P&L
+            open_positions = trade_metrics.get('open_positions', 0)
+            if open_positions > 0:
+                # Get open trades to calculate unrealized P&L
+                try:
+                    open_trades = self.reader.get_open_trades(strategy_name)
+                    if not open_trades.empty and 'unrealized_pnl' in open_trades.columns:
+                        perf['unrealized_pnl'] = open_trades['unrealized_pnl'].sum()
+                    else:
+                        perf['unrealized_pnl'] = 0.0
+                except Exception:
+                    perf['unrealized_pnl'] = 0.0
+            else:
+                # No open positions, no unrealized P&L
+                perf['unrealized_pnl'] = 0.0
+
             print("✓")
         except Exception as e:
             print(f"✗ Failed: {e}")

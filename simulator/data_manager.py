@@ -31,7 +31,11 @@ PROGRESS_FILE = OFFLINE_DATA_DIR / 'download_progress.json'
 class DataManager:
     def __init__(self, api_key, secret_key, offline_mode=False, quiet=True):
         """Initialize DataManager with optimized settings"""
-        self.data_client = StockHistoricalDataClient(api_key, secret_key)
+        # Only initialize API client if not in offline mode
+        if offline_mode:
+            self.data_client = None
+        else:
+            self.data_client = StockHistoricalDataClient(api_key, secret_key)
         self.offline_mode = offline_mode
         self.quiet = quiet
         self.offline_data_dir = OFFLINE_DATA_DIR

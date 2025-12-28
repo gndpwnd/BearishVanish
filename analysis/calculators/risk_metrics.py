@@ -5,16 +5,26 @@
 """
 Risk Metrics Calculator
 Sharpe, Sortino, VaR, CVaR, volatility, etc.
+
+IMPORTANT: This calculator assumes DAILY bars (252 trading days/year).
+If using intraday data, adjust TRADING_DAYS_PER_YEAR accordingly.
 """
 
 from .base_calculator import BaseCalculator
 import numpy as np
 import pandas as pd
 
+# Configuration for annualization
+# For daily bars: 252 trading days per year
+# For hourly bars: 252 * 6.5 = 1638 bars per year
+# For 6-hour bars: 252 * 1.08 = 272 bars per year
+TRADING_DAYS_PER_YEAR = 252  # Standard for daily data
+RISK_FREE_RATE_ANNUAL = 0.04  # 4% annual risk-free rate (Treasury)
+
 
 class RiskMetricsCalculator(BaseCalculator):
     """Calculate comprehensive risk metrics"""
-    
+
     def calculate(self):
         """
         Calculate all risk metrics
@@ -59,43 +69,72 @@ class RiskMetricsCalculator(BaseCalculator):
         return metrics
     
     def _annualized_volatility(self, returns):
-        """Calculate annualized volatility with correct factor"""
-        # For 6-hour bars: 6.5 trading hours / 6 hours per bar
-        bars_per_day = 6.5 / 6.0  # ~1.08 bars per day
-        bars_per_year = bars_per_day * 252
-        return returns.std() * np.sqrt(bars_per_year) * 100
-    
+        """
+        Calculate annualized volatility.
+
+        For daily returns: annualized_vol = daily_std * sqrt(252)
+        """
+        if len(returns) == 0:
+            return 0
+        return returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
+
     def _downside_deviation(self, returns, target=0.0):
-        """Calculate downside deviation (semi-deviation)"""
+        """
+        Calculate downside deviation (semi-deviation).
+        Only considers returns below the target.
+        """
         downside = returns[returns < target]
         if len(downside) == 0:
             return 0
-        bars_per_day = 6.5 / 6.0
-        bars_per_year = bars_per_day * 252
-        return np.sqrt(np.mean(downside ** 2)) * np.sqrt(bars_per_year) * 100
-    
-    def _sharpe_ratio(self, returns, risk_free_rate=0.0):
-        """Calculate Sharpe ratio"""
-        excess_returns = returns - (risk_free_rate / 252 / 6.5)
-        if excess_returns.std() == 0:
+        return np.sqrt(np.mean(downside ** 2)) * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
+
+    def _sharpe_ratio(self, returns):
+        """
+        Calculate Sharpe ratio.
+
+        Sharpe = (annualized_return - risk_free_rate) / annualized_volatility
+
+        For daily data:
+        - Daily risk-free = annual_rate / 252
+        - Annualize with sqrt(252)
+        """
+        if len(returns) == 0 or returns.std() == 0:
             return 0
-        bars_per_day = 6.5 / 6.0
-        bars_per_year = bars_per_day * 252
-        sharpe = excess_returns.mean() / excess_returns.std()
-        return sharpe * np.sqrt(bars_per_year)
-    
+
+        # Daily risk-free rate
+        daily_rf = RISK_FREE_RATE_ANNUAL / TRADING_DAYS_PER_YEAR
+
+        # Excess returns over risk-free
+        excess_returns = returns - daily_rf
+
+        # Sharpe ratio: mean excess return / std, annualized
+        sharpe = (excess_returns.mean() / excess_returns.std()) * np.sqrt(TRADING_DAYS_PER_YEAR)
+        return sharpe
+
     def _sortino_ratio(self, returns, target_return=0.0):
-        """Calculate Sortino ratio"""
-        excess_returns = returns - (target_return / 252 / 6.5)
+        """
+        Calculate Sortino ratio.
+
+        Like Sharpe but uses downside deviation instead of total std.
+        """
+        if len(returns) == 0:
+            return 0
+
+        # Daily risk-free rate
+        daily_rf = RISK_FREE_RATE_ANNUAL / TRADING_DAYS_PER_YEAR
+
+        # Excess returns
+        excess_returns = returns - daily_rf
+
+        # Downside deviation (already annualized, in %)
         downside_dev = self._downside_deviation(returns, target_return) / 100
-        
+
         if downside_dev == 0:
             return 0
 
-        bars_per_day = 6.5 / 6.0
-        bars_per_year = bars_per_day * 252
-        sortino = excess_returns.mean() / downside_dev
-        return sortino * np.sqrt(bars_per_year)
+        # Sortino: annualized excess return / downside deviation
+        mean_excess_annual = excess_returns.mean() * TRADING_DAYS_PER_YEAR
+        return mean_excess_annual / downside_dev
     
     def _calmar_ratio(self):
         """Calculate Calmar ratio"""
@@ -262,26 +301,32 @@ class RiskMetricsCalculator(BaseCalculator):
         
         excess_returns = port_rets - bench_rets
         tracking_error = excess_returns.std()
-        
+
         if tracking_error == 0:
             return None
-        
-        bars_per_day = 6.5 / 6.0
-        bars_per_year = bars_per_day * 252
-        ir = excess_returns.mean() / tracking_error
-        return ir * np.sqrt(bars_per_year)
-    
+
+        # Annualize: IR = (mean excess / tracking_error) * sqrt(252)
+        ir = (excess_returns.mean() / tracking_error) * np.sqrt(TRADING_DAYS_PER_YEAR)
+        return ir
+
     def _treynor_ratio(self, returns):
-        """Calculate Treynor ratio"""
+        """
+        Calculate Treynor ratio.
+
+        Treynor = (portfolio_return - risk_free) / beta
+        Measures return per unit of systematic risk.
+        """
         beta = self._calculate_beta()
         if beta is None or beta == 0:
             return None
-        
-        bars_per_day = 6.5 / 6.0
-        bars_per_year = bars_per_day * 252
-        excess_returns = returns - (0.0 / bars_per_year)  # risk_free = 0
-        treynor = excess_returns.mean() / beta
-        return treynor * bars_per_year
+
+        # Daily risk-free rate
+        daily_rf = RISK_FREE_RATE_ANNUAL / TRADING_DAYS_PER_YEAR
+
+        # Annualized excess return
+        excess_return_annual = (returns.mean() - daily_rf) * TRADING_DAYS_PER_YEAR
+
+        return excess_return_annual / beta
     
     def _empty_metrics(self):
         """Return empty metrics structure"""

@@ -1,52 +1,164 @@
 # BearishVanish
-Trying stock trading bots
-> [Alpaca API Python Reference](https://pypi.org/project/alpaca-py/)
 
-**Setup a .env**
+A production-grade quantitative trading simulation, analysis, and visualization platform.
 
-```bash
-ALPACA_API_KEY=your_api_key_here
-ALPACA_SECRET_KEY=your_secret_key_here
-ALPACA_BASE_URL=https://paper-api.alpaca.markets
-```
+## Overview
 
+BearishVanish consists of three main components:
 
-**Setup venv and install requirements**
+| Component | Description | Entry Point |
+|-----------|-------------|-------------|
+| **Simulator** | Backtests trading strategies on historical data | `simulator/main.py` |
+| **Analysis** | Computes 50+ performance metrics | `analysis/analysis_engine.py` |
+| **Visualizer** | Interactive web dashboard | `visualizer/main.py` |
 
-```bash
-python3 -m venv venv; source venv/bin/activate; pip install --upgrade pip; pip install -r requirements.txt
-```
+## Quick Start
 
-What is being run:
+### 1. Setup Environment
 
 ```bash
+# Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+### 2. Configure API Credentials
 
-Clean up environment
-
+Create `.env` file:
 ```bash
-deactivate
+ALPACA_API_KEY=your_api_key_here
+ALPACA_SECRET_KEY=your_secret_key_here
 ```
 
-view what would be deleted, except for venv/
+### 3. Run Simulation
 
 ```bash
-git clean -xdn -e venv/
+cd simulator
+
+# Update universe and download data
+python main.py --update-universe sp500
+python main.py --download --universe sp500
+
+# Run simulation
+python main.py --universe sp500
 ```
 
-delete what would be deleted, except for venv/
+### 4. Analyze Results
 
 ```bash
-git clean -xdf -e venv/
+cd ../analysis
+python analysis_engine.py --latest
 ```
 
-Need to install tkinter for interactive plotting
+### 5. View Dashboard
 
+```bash
+cd ../visualizer
+python main.py
+# Open http://localhost:8000
+```
+
+---
+
+## Documentation
+
+Comprehensive documentation is available in the `0_docs/` directory:
+
+| Document | Description |
+|----------|-------------|
+| [PROJECT_DOCUMENTATION.md](0_docs/PROJECT_DOCUMENTATION.md) | Full architecture and API reference |
+| [STRATEGY_DEVELOPMENT.md](0_docs/STRATEGY_DEVELOPMENT.md) | Guide to creating custom strategies |
+| [ANALYSIS_METRICS.md](0_docs/ANALYSIS_METRICS.md) | All 50+ metrics explained |
+| [HPC/README](hpc_scripts/README.md) | HPC cluster deployment guide |
+
+---
+
+## Features
+
+- **High Performance**: Numba JIT compilation for 10-100x faster indicators
+- **Parallel Processing**: Multi-core simulation across strategies and symbols
+- **12 Built-in Strategies**: Momentum, mean reversion, breakout, and more
+- **50+ Metrics**: Sharpe, Sortino, Calmar, VaR, CVaR, Alpha, Beta, etc.
+- **Interactive Dashboard**: Equity curves, drawdowns, monthly heatmaps
+- **HPC Ready**: Scripts for deploying to compute clusters
+
+---
+
+## Directory Structure
+
+```
+BearishVanish/
+├── simulator/          # Backtesting engine
+│   ├── strategies/     # Trading strategies
+│   └── simulations/    # Output databases
+├── analysis/           # Metrics calculation
+│   └── analysis_dbs/   # Output databases
+├── visualizer/         # Web dashboard
+├── hpc_scripts/        # HPC deployment
+└── 0_docs/             # Documentation
+```
+
+---
+
+## HPC Deployment
+
+For running simulations on HPC clusters:
+
+```bash
+# Sync to HPC (from local)
+./hpc_scripts/sync_to_hpc.sh
+
+# Run on HPC
+ssh user@hpc
+cd /path/to/BearishVanish
+./hpc_scripts/run_full_pipeline.sh sp500
+
+# Fetch results (from local)
+./hpc_scripts/fetch_results.sh
+```
+
+See [hpc_scripts/README.md](hpc_scripts/README.md) for full instructions.
+
+---
+
+## Command Reference
+
+### Simulator
+
+```bash
+python main.py --universe sp500      # Run simulation
+python main.py --download --universe sp500  # Download data
+python main.py --offline             # Use cached data only
+python main.py --optimize            # Optimize system settings
+python main.py --cache-status        # Show cache status
+python main.py --update-universe sp500  # Update universe
+```
+
+### Analysis
+
+```bash
+python analysis_engine.py --latest   # Analyze latest simulation
+python analysis_engine.py --sim <path>  # Analyze specific simulation
+```
+
+### Visualizer
+
+```bash
+python main.py                       # Start dashboard (port 8000)
+uvicorn main:app --reload --port 8000  # Development mode
+```
+
+---
+
+## Requirements
+
+- Python 3.9+
+- Alpaca API account (free paper trading)
+- Dependencies in `requirements.txt`
+
+For interactive plotting:
 ```bash
 sudo apt-get update
 sudo apt-get install python3-tk
@@ -54,29 +166,36 @@ sudo apt-get install python3-tk
 
 ---
 
-# Trading Methodologies
+## License
 
+MIT License
 
-### Intersectorcide
+---
 
-> S&P 500 Intersection with Stock Price
+## Original Notes
 
-### TNBiggieRiggy
-> "The Notorious Biggie Rigged System" Method
+### Alpaca API Reference
+> [Alpaca API Python Reference](https://pypi.org/project/alpaca-py/)
 
-### AllYouCanEatBuffet
-> If the company is so good it could be run by an idiot and still make money, but actually run by a good person, then no-brainer buy.
+### Environment Cleanup
 
-### NewsFeels
-> News scraping and sentiment analysis to determine stock price movement?
+```bash
+deactivate  # Exit venv
 
+# View what would be deleted (except venv/)
+git clean -xdn -e venv/
 
-# Potential Errors
+# Delete (except venv/)
+git clean -xdf -e venv/
+```
 
+### Potential Errors
 
-### Order failed: potential wash trade detected. use complex orders alpaca
+#### Wash Trade Detection
+> "Order failed: potential wash trade detected. use complex orders alpaca"
 
-[reference](https://forum.alpaca.markets/t/apierror-potential-wash-trade-detected-use-complex-orders/13441/6)
-The order is being rejected because it could result in a a ‘wash trade’. A wash trade (not to be confused with a wash sale) is when one trades with oneself. This is when one’s buy order fills against one’s sell order. The SEC looks very unfavorably on that and imposes harsh penalties for repeat offenders.
+[Reference](https://forum.alpaca.markets/t/apierror-potential-wash-trade-detected-use-complex-orders/13441/6)
 
-Because of that, Alpaca puts in place protections which reject any order where there is an existing open order having the opposite side. In general, one’s algo should be either increasing a position or decreasing a position (ie buying or selling) and not be doing those simultaneously.
+The order is being rejected because it could result in a 'wash trade'. A wash trade is when one trades with oneself (buy order fills against one's sell order). The SEC looks very unfavorably on this.
+
+Alpaca rejects any order where there is an existing open order on the opposite side. Your algo should be either increasing or decreasing a position, not doing both simultaneously.
