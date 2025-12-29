@@ -21,6 +21,16 @@ import logging
 from strategy_tracker import StrategyTracker
 from simulation_telemetry import SimulationTelemetry, BatchBuffer
 
+# Import progress reporter for API monitoring
+try:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from monitoring.progress_reporter import get_reporter
+    MONITORING_AVAILABLE = True
+except ImportError:
+    MONITORING_AVAILABLE = False
+    get_reporter = None
+
 # Configure logging
 logging.basicConfig(
     filename='simulation_errors.log',
@@ -561,7 +571,28 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     """
     # Initialize telemetry system
     telemetry = SimulationTelemetry()
-    
+
+    # Initialize progress reporter for API monitoring
+    reporter = None
+    process_id = None
+    if MONITORING_AVAILABLE:
+        try:
+            reporter = get_reporter()
+            total_tasks = len(strategies) * len(symbols)
+            process_id = reporter.register(
+                process_type="simulation",
+                total_items=total_tasks,
+                metadata={
+                    "strategies": [s.name for s in strategies],
+                    "num_symbols": len(symbols),
+                    "num_strategies": len(strategies),
+                    "workers": None  # Will be set later
+                }
+            )
+        except Exception as e:
+            print(f"   Warning: Could not initialize progress reporting: {e}")
+            reporter = None
+
     # Load optimization configuration
     try:
         from config_optimizer import load_optimization_config
@@ -763,10 +794,27 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
                     
                     import traceback
                     traceback.print_exc()
-                
+
                 pbar.update(1)
-    
+
+                # Report progress to monitoring API
+                if reporter and process_id:
+                    try:
+                        reporter.update(
+                            pbar.n,
+                            f"{strategy_name} on {symbol}"
+                        )
+                    except:
+                        pass  # Silently fail for progress updates
+
     simulation_time = time.time() - start_time
+
+    # Mark simulation complete in monitoring API
+    if reporter and process_id:
+        try:
+            reporter.complete("Simulation completed successfully")
+        except:
+            pass
     
     # STEP 6: WRITE ALL COLLECTED DATA TO DATABASE
     print(f"\n💾 Recording telemetry data...")
