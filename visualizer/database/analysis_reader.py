@@ -91,7 +91,11 @@ class AnalysisReader:
     def get_strategies(self) -> List[str]:
         """Get list of all strategies"""
         return self.strategies
-    
+
+    def list_strategies(self) -> List[str]:
+        """Alias for get_strategies() for CLI compatibility"""
+        return self.get_strategies()
+
     def get_metadata(self) -> Dict[str, str]:
         """Get analysis metadata"""
         return self.metadata

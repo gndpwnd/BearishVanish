@@ -1,0 +1,35 @@
+strategy #1 - buying and selling based on slope reversal after crossing the S&P 500
+
+basically find when the slope of the cumulative return percentage of the stock reverse direction
+
+if it starts going up and it previously cross the s&P 500 while the slope of the cumulative return percentage of the stock was negative, then buy
+
+if it starts going down and it previously cross the s&P 500 while the slope of the cumulative return percentage of the stock was positive, then sell
+
+and then only buy once until it crosses the s&P again, and then only sell once until it crosses the s&p again
+
+i don't want just one buy and one sell total, i want one buy charted per cross as in the first buy after it dips below the s&P and then one sell charted per cross as in the first sell after it climbs across the s&p
+
+you cannot buy if the stock is above the s&p500 and you cannot sell if the stock is below the s&p500
+
+make sure to only have one buy while below the s&p500 and one sell while above the s&p500
+
+make sure to have a buy signal before the next sell signal and a sell signal before the next buy signal
+
+
+
+strategy #2 - buying and selling based on percentage increase and decrease over week.
+
+if the stock goes down 5% in a week monday to monday, buy $5
+if the stock goes up 10% in a week monday to monday, sell $10
+if the stock goes down 5% in a month 1st to 1st, buy $5
+if the stock goes up 10% in a month 1st to 1st, sell $10
+
+I want the week long signals to be tied together, for example don't make a sell-weeek signal if there is no buy-week signal right before it
+
+now i want to have streaming data handling, instead of hard-coded monday to monday and 15-15, simply take the past 7 days, the past 15 day, and the past 30 days
+
+
+strategy #3 - buying and selling based on percentange increase and decresase over a month
+
+for example don't make a sell-month signal if there is no buy-month signal right before it

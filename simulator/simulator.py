@@ -596,7 +596,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
     
     # Determine date range
     end_date = pd.Timestamp.now()
-    start_date = end_date - pd.Timedelta(days=180)
+    start_date = end_date - pd.Timedelta(days=365)
     
     # Load symbols in batch with progress bar
     with tqdm(total=len(symbols), desc="Loading data", unit="stock", 
@@ -612,7 +612,7 @@ def run_simulation(strategies, symbols, data_manager, universe_manager, args):
         pbar.update(len(symbols))
     
     # Load SPY data separately
-    spy_data = data_manager.get_stock_data('SPY', days=180)
+    spy_data = data_manager.get_stock_data('SPY', days=365)
     
     # Filter out None data
     data_dict = {k: v for k, v in data_dict.items() if v is not None and not v.empty}

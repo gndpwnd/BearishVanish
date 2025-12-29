@@ -26,25 +26,32 @@ class MarkdownReportGenerator:
     def get_db_timestamp(self) -> str:
         """
         Get database timestamp from metadata for filename
-        
+
         Returns:
             Formatted timestamp string (YYYYMMDD_HHMMSS)
         """
         try:
-            # Try to get timestamp from metadata
             metadata = self.reader.get_metadata()
+
+            # Try analysis_timestamp (stored as Unix timestamp string)
+            if 'analysis_timestamp' in metadata:
+                ts = int(metadata['analysis_timestamp'])
+                dt = datetime.fromtimestamp(ts)
+                return dt.strftime('%Y%m%d_%H%M%S')
+
+            # Legacy support for ISO format timestamps
             if 'created_at' in metadata:
                 ts = metadata['created_at']
-                # Parse and reformat
                 dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
                 return dt.strftime('%Y%m%d_%H%M%S')
             elif 'timestamp' in metadata:
                 ts = metadata['timestamp']
                 dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
                 return dt.strftime('%Y%m%d_%H%M%S')
-        except Exception:
+        except Exception as e:
+            print(f"Warning: Could not extract timestamp from metadata: {e}")
             pass
-        
+
         # Fallback to current time if metadata not available
         return datetime.now().strftime('%Y%m%d_%H%M%S')
     

@@ -32,27 +32,43 @@ class SimulationTelemetry:
     def __init__(self, simulation_name=None):
         """Initialize telemetry for a new simulation"""
         TELEMETRY_ROOT.mkdir(exist_ok=True)
-        
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
+
         if simulation_name:
             safe_name = "".join(c for c in simulation_name if c.isalnum() or c in ('-', '_'))
             db_name = f"simulation_{timestamp}_{safe_name}.db"
         else:
             hash_suffix = hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:8]
             db_name = f"simulation_{timestamp}_{hash_suffix}.db"
-        
+
         self.db_path = TELEMETRY_ROOT / db_name
         self.simulation_id = db_name.replace('.db', '')
-        
+
         print(f"\n📊 Creating simulation database: {db_name}")
         self._init_database()
+
+    def _get_optimized_connection(self):
+        """Get database connection with performance optimizations"""
+        return get_utf8_connection(
+            self.db_path,
+            journal_mode='WAL',        # Write-Ahead Logging (5-10x faster)
+            synchronous='NORMAL',      # Safe but faster than FULL
+            cache_size=10000,          # 10MB cache
+            temp_store='MEMORY'        # Temp tables in RAM
+        )
     
     def _init_database(self):
         """Create enhanced database schema with volume tracking and UTF-8 encoding"""
-        conn = get_utf8_connection(self.db_path)
+        conn = get_utf8_connection(
+            self.db_path,
+            journal_mode='WAL',        # Enable Write-Ahead Logging (5-10x faster writes)
+            synchronous='NORMAL',      # Safe but faster than FULL (2-3x speedup)
+            cache_size=10000,          # 10MB cache (default is 2MB)
+            temp_store='MEMORY'        # Keep temp tables in RAM
+        )
         cursor = conn.cursor()
-        
+
         # Set UTF-8 encoding explicitly
         cursor.execute("PRAGMA encoding = 'UTF-8'")
         
@@ -858,18 +874,18 @@ class SimulationTelemetry:
             )
             sanitized_attempts.append(sanitized)
         
-        conn = get_utf8_connection(self.db_path)
+        conn = self._get_optimized_connection()
         cursor = conn.cursor()
-        
+
         cursor.executemany('''
             INSERT INTO trade_attempts
             (timestamp, date, strategy_name, symbol, signal, price,
              volume, avg_volume_20d, relative_volume,
-             portfolio_value, cash, num_positions, max_positions, 
+             portfolio_value, cash, num_positions, max_positions,
              success, rejection_reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', sanitized_attempts)
-        
+
         conn.commit()
         conn.close()
 
@@ -904,27 +920,27 @@ class SimulationTelemetry:
             )
             sanitized_entries.append(sanitized)
         
-        conn = get_utf8_connection(self.db_path)
+        conn = self._get_optimized_connection()
         cursor = conn.cursor()
-        
+
         cursor.executemany('''
             INSERT INTO trade_history
             (strategy_name, symbol, entry_timestamp, entry_date, entry_price, shares,
             entry_volume, entry_avg_volume_20d, entry_relative_volume,
-            entry_portfolio_value, entry_cash, entry_num_positions, 
+            entry_portfolio_value, entry_cash, entry_num_positions,
             trade_status, entry_reason)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
         ''', sanitized_entries)
-        
+
         conn.commit()
         conn.close()
-    
+
     def batch_update_trade_exits(self, exits_list):
-        """Batch update trade exits with UTF-8 safety"""
+        """Batch update trade exits with UTF-8 safety and optimized connection"""
         if not exits_list:
             return
-        
-        conn = get_utf8_connection(self.db_path)
+
+        conn = self._get_optimized_connection()
         cursor = conn.cursor()
         
         for exit_tuple in exits_list:
@@ -1024,16 +1040,16 @@ class SimulationTelemetry:
             )
             sanitized_snapshots.append(sanitized)
         
-        conn = get_utf8_connection(self.db_path)
+        conn = self._get_optimized_connection()
         cursor = conn.cursor()
-        
+
         cursor.executemany('''
             INSERT INTO portfolio_history
             (timestamp, strategy_name, date, portfolio_value, cash, positions_value,
              num_positions, daily_return_pct)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', sanitized_snapshots)
-        
+
         conn.commit()
         conn.close()
 
@@ -1059,9 +1075,9 @@ class SimulationTelemetry:
             )
             sanitized_entries.append(sanitized)
         
-        conn = get_utf8_connection(self.db_path)
+        conn = self._get_optimized_connection()
         cursor = conn.cursor()
-        
+
         cursor.executemany('''
             INSERT INTO execution_log
             (timestamp, date, bar_number, strategy_name, symbol, action, details)
