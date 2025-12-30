@@ -539,7 +539,14 @@ class DataManager:
                 return self.load_offline_data(symbol, start_date, end_date)
             
             if self.offline_mode:
-                print(f"⚠️  {symbol}: Missing data in offline mode")
+                # In offline mode, return whatever data is available
+                # Don't return None just because we don't have full coverage
+                available_data = self.load_offline_data(symbol)
+                if available_data is not None and not available_data.empty:
+                    if not self.quiet:
+                        print(f"ℹ️  {symbol}: Using available offline data ({len(available_data)} bars)")
+                    return available_data
+                print(f"⚠️  {symbol}: No offline data available")
                 return None
             
             if not self.quiet and not self.trickle_mode:

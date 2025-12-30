@@ -32,27 +32,49 @@ ALPACA_API_KEY=your_api_key_here
 ALPACA_SECRET_KEY=your_secret_key_here
 ```
 
-### 3. Run Simulation
+### 3. Download Market Data (One-Time)
+
+**Best Practice**: Download all required data FIRST, then run simulations in offline mode.
 
 ```bash
 cd simulator
 
-# Update universe and download data
+# Update universe (get list of symbols)
 python main.py --update-universe sp500
+
+# Download 1 year of historical data (requires API keys)
 python main.py --download --universe sp500
 
-# Run simulation
+# Verify data completeness
+python main.py --cache-status
+```
+
+### 4. Run Simulation (Offline Mode Recommended)
+
+```bash
+cd simulator
+
+# Run with cached data (fast, no API calls)
+python main.py --offline --universe sp500
+
+# Or run with live API (slower, fills gaps)
 python main.py --universe sp500
 ```
 
-### 4. Analyze Results
+**Why Offline Mode?**
+- Faster simulation startup (no network calls)
+- Reproducible results with same data
+- HPC cluster doesn't need API keys
+- API calls happen once during download, not every simulation
+
+### 5. Analyze Results
 
 ```bash
 cd ../analysis
 python analysis_engine.py --latest
 ```
 
-### 5. View Dashboard
+### 6. View Dashboard
 
 ```bash
 cd ../visualizer
@@ -64,14 +86,16 @@ python main.py
 
 ## Documentation
 
-Comprehensive documentation is available in the `0_docs/` directory:
+Comprehensive documentation is available in the `docs/` directory:
 
 | Document | Description |
 |----------|-------------|
-| [PROJECT_DOCUMENTATION.md](0_docs/PROJECT_DOCUMENTATION.md) | Full architecture and API reference |
-| [STRATEGY_DEVELOPMENT.md](0_docs/STRATEGY_DEVELOPMENT.md) | Guide to creating custom strategies |
-| [ANALYSIS_METRICS.md](0_docs/ANALYSIS_METRICS.md) | All 50+ metrics explained |
+| [PROJECT_ROADMAP.md](docs/PROJECT_ROADMAP.md) | Current status and future plans |
+| [PROJECT_DOCUMENTATION.md](docs/PROJECT_DOCUMENTATION.md) | Full architecture and API reference |
+| [STRATEGY_DEVELOPMENT.md](docs/STRATEGY_DEVELOPMENT.md) | Guide to creating custom strategies |
+| [ANALYSIS_METRICS.md](docs/ANALYSIS_METRICS.md) | All 50+ metrics explained |
 | [HPC/README](hpc_scripts/README.md) | HPC cluster deployment guide |
+| [Findings/](docs/Findings/) | Implementation summaries and analysis |
 
 ---
 
@@ -83,6 +107,46 @@ Comprehensive documentation is available in the `0_docs/` directory:
 - **50+ Metrics**: Sharpe, Sortino, Calmar, VaR, CVaR, Alpha, Beta, etc.
 - **Interactive Dashboard**: Equity curves, drawdowns, monthly heatmaps
 - **HPC Ready**: Scripts for deploying to compute clusters
+
+---
+
+## Strategy Development Philosophy
+
+**IMPORTANT**: This project prioritizes **sound statistical reasoning** over curve-fitting to historical data.
+
+### Principles
+
+1. **Generalization over Optimization**: Strategies should work on future unseen data, not just historical backtests. We avoid overfitting to specific time periods.
+
+2. **Statistical Foundations**: All strategies are based on well-documented market phenomena:
+   - Mean reversion (price returns to average)
+   - Momentum (trends tend to persist)
+   - Volume confirmation (institutions move prices)
+   - Relative strength (outperformers continue outperforming)
+
+3. **Robust Indicators**: We use indicators with theoretical backing:
+   - RSI: Measures overbought/oversold conditions
+   - Bollinger Bands: Measures price deviation from mean
+   - VWAP: Institutional price benchmark
+   - ADX: Trend strength measurement
+
+4. **Simple Rules over Complex Models**: Simple strategies with few conditions are more likely to generalize. Complex strategies with many conditions tend to overfit.
+
+5. **Walk-Forward Validation**: Test on data the strategy has never seen. Past performance does not guarantee future results.
+
+### What We Don't Do
+
+- ❌ Optimize parameters to maximize historical returns
+- ❌ Add conditions just because they improved backtests
+- ❌ Cherry-pick time periods that look good
+- ❌ Use machine learning without proper validation
+
+### What We Do
+
+- ✅ Use established financial theory
+- ✅ Keep strategies simple and interpretable
+- ✅ Test on multiple time periods and market conditions
+- ✅ Document the statistical reasoning behind each rule
 
 ---
 
@@ -107,17 +171,25 @@ BearishVanish/
 For running simulations on HPC clusters:
 
 ```bash
-# Sync to HPC (from local)
+# Step 1: Download data locally first (requires API keys)
+cd simulator
+python main.py --download --universe sp500
+python main.py --cache-status  # Verify completeness
+
+# Step 2: Sync to HPC (includes data in offline_data/)
 ./hpc_scripts/sync_to_hpc.sh
 
-# Run on HPC
+# Step 3: Run on HPC (uses offline mode - no API needed)
 ssh user@hpc
 cd /path/to/BearishVanish
-./hpc_scripts/run_full_pipeline.sh sp500
+./hpc_scripts/run_complete_pipeline.sh sp500 --offline
 
-# Fetch results (from local)
+# Step 4: Fetch results (from local)
 ./hpc_scripts/fetch_results.sh
 ```
+
+**Key Point**: The HPC cluster runs in `--offline` mode using the data you synced.
+API keys are only needed on your local machine for the initial download.
 
 See [hpc_scripts/README.md](hpc_scripts/README.md) for full instructions.
 

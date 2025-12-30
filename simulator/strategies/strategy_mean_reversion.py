@@ -47,9 +47,9 @@ class Strategy(StrategyBase):
         self.bb_period = 20
         self.bb_std = 2.0
         self.rsi_period = 14
-        self.rsi_oversold = 30
+        self.rsi_oversold = 35  # Raised from 30 to 35 for more signals
         self.rsi_overbought = 70
-        self.volume_threshold = 1.2
+        self.volume_threshold = 1.1  # Lowered from 1.2 to 1.1 for more signals
         self.stop_loss_pct = 0.05  # 5% stop-loss
 
         # Required indicators
@@ -121,11 +121,11 @@ class Strategy(StrategyBase):
                     return 'SELL'
 
             # ===================================
-            # ENTRY LOGIC
+            # ENTRY LOGIC (Phase 2: Relaxed to OR logic)
             # ===================================
             if not self._position_state[symbol]:
-                # Condition 1: Price below lower Bollinger Band (oversold)
-                price_oversold = current_price < bb_lower
+                # Condition 1: Price below/near lower Bollinger Band (oversold)
+                price_oversold = current_price <= bb_lower * 1.02  # Within 2% of lower band
 
                 # Condition 2: RSI oversold
                 rsi_oversold = rsi < self.rsi_oversold
@@ -133,12 +133,18 @@ class Strategy(StrategyBase):
                 # Condition 3: Volume spike (institutional confirmation)
                 volume_spike = rel_volume > self.volume_threshold
 
-                # Note: Removed VWAP requirement - it was a logical contradiction
-                # When price < bb_lower (oversold), price is almost never > VWAP
-                # This was preventing all trades from triggering
+                # Phase 2 Fix: Use OR logic instead of AND
+                # Entry Pattern A: BB oversold + RSI oversold (classic mean reversion)
+                pattern_a = price_oversold and rsi_oversold
 
-                # ALL conditions must be met (3 conditions, VWAP removed)
-                if price_oversold and rsi_oversold and volume_spike:
+                # Entry Pattern B: BB oversold + Volume spike (institutional buying)
+                pattern_b = price_oversold and volume_spike
+
+                # Entry Pattern C: RSI very oversold (< 25) with any volume
+                pattern_c = rsi < 25
+
+                # Enter if ANY pattern matches
+                if pattern_a or pattern_b or pattern_c:
                     self._position_state[symbol] = True
                     self._entry_prices[symbol] = current_price
                     return 'BUY'

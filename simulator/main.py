@@ -33,6 +33,7 @@ def parse_arguments():
     parser.add_argument('--tickers', type=str, help='Comma-separated tickers')
     parser.add_argument('--offline', action='store_true', help='Offline mode')
     parser.add_argument('--workers', type=int, default=None, help='Download workers (auto if not specified)')
+    parser.add_argument('--days', type=int, default=365, help='Days of historical data to download (default: 365 for 1 year)')
     
     # Universe management
     parser.add_argument('--update-universe', type=str, help='Update universe')
@@ -146,14 +147,18 @@ def handle_download(args, data_manager, universe_manager):
     else:
         symbols = ['AAPL', 'GOOGL', 'TSLA', 'MSFT', 'NVDA', 'META', 'SPY']
     
+    # Get days parameter (default 365 for 1 year of data)
+    days = args.days if hasattr(args, 'days') and args.days else 365
+
     print(f"📦 Downloading {len(symbols)} symbols with {workers} workers")
+    print(f"📅 Requesting {days} days of historical data (1 year = 365)")
     print(f"⚡ Using optimized worker count from system benchmark\n")
-    
+
     def download_symbol(symbol):
         try:
             # Create new data manager for thread safety
             thread_dm = DataManager(api_key, secret_key, offline_mode=False, quiet=True)
-            df = thread_dm.get_stock_data(symbol)
+            df = thread_dm.get_stock_data(symbol, days=days)
             del thread_dm
             return (symbol, df, None)
         except Exception as e:

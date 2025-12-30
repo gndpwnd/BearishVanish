@@ -533,13 +533,23 @@ def precompute_all_indicators(data: pd.DataFrame,
     for indicator_spec in required_indicators:
         parts = indicator_spec.split('_')
         indicator_name = parts[0]
-        
+
+        # Handle compound indicator names (bollinger_bands, relative_volume)
+        if indicator_spec.startswith('bollinger_bands'):
+            indicator_name = 'bollinger_bands'
+            parts = indicator_spec.replace('bollinger_bands', '').split('_')
+            parts = [p for p in parts if p]  # Remove empty strings
+        elif indicator_spec.startswith('relative_volume'):
+            indicator_name = 'relative_volume'
+            parts = indicator_spec.replace('relative_volume', '').split('_')
+            parts = [p for p in parts if p]  # Remove empty strings
+
         # Extract parameters from name (e.g., 'sma_20' → period=20)
         params = {}
         if len(parts) > 1:
             try:
                 params['period'] = int(parts[1])
-            except ValueError:
+            except (ValueError, IndexError):
                 pass
         
         # Handle specific parameter extraction for different indicators
@@ -620,6 +630,31 @@ def precompute_all_indicators(data: pd.DataFrame,
                 )
                 enriched_data[f'{indicator_spec}_k'] = k_line
                 enriched_data[f'{indicator_spec}_d'] = d_line
+            # ==== ADVANCED INDICATORS ====
+            elif indicator_name == 'vwap' and ADVANCED_INDICATORS_AVAILABLE:
+                from indicator_advanced import calculate_vwap
+                enriched_data['vwap'] = calculate_vwap(data)
+            elif indicator_name == 'mfi' and ADVANCED_INDICATORS_AVAILABLE:
+                from indicator_advanced import calculate_mfi
+                enriched_data['mfi'] = calculate_mfi(data, params.get('period', 14))
+            elif indicator_name == 'obv' and ADVANCED_INDICATORS_AVAILABLE:
+                from indicator_advanced import calculate_obv
+                enriched_data['obv'] = calculate_obv(data)
+            elif indicator_name == 'adx' and ADVANCED_INDICATORS_AVAILABLE:
+                from indicator_advanced import calculate_adx
+                adx_vals, plus_di, minus_di = calculate_adx(data, params.get('period', 14))
+                enriched_data['adx'] = adx_vals
+                enriched_data['adx_plus_di'] = plus_di
+                enriched_data['adx_minus_di'] = minus_di
+            elif indicator_name == 'supertrend' and ADVANCED_INDICATORS_AVAILABLE:
+                from indicator_advanced import calculate_supertrend
+                supertrend_val, supertrend_dir = calculate_supertrend(
+                    data,
+                    params.get('period', 10),
+                    params.get('multiplier', 3.0)
+                )
+                enriched_data['supertrend'] = supertrend_val
+                enriched_data['supertrend_direction'] = supertrend_dir
         except Exception:
             # SILENT: Skip indicator on error
             pass

@@ -51,9 +51,11 @@ class Strategy(StrategyBase):
         self.stop_loss_pct = self.config.stop_loss_pct if self.config.stop_loss_pct else 0.08
 
         # Strategy parameters
+        # Phase 2: Lowered ADX thresholds based on trend-following research
+        # ADX > 20 indicates trending market (Wilder, 1978)
         self.adx_period = 14
-        self.adx_strong_trend = 25
-        self.adx_weak_trend = 20
+        self.adx_strong_trend = 20  # Lowered from 25 to 20
+        self.adx_weak_trend = 15  # Lowered from 20 to 15
         self.supertrend_period = 10
         self.supertrend_multiplier = 3.0
         self.ema_fast = 20
@@ -63,7 +65,8 @@ class Strategy(StrategyBase):
         self.required_indicators = [
             'adx',
             'supertrend',
-            'ema',
+            f'ema_{self.ema_fast}',   # ema_20
+            f'ema_{self.ema_slow}',   # ema_50
             'vwap'
         ]
 
@@ -160,33 +163,34 @@ class Strategy(StrategyBase):
                     return 'SELL'
 
             # ===================================
-            # ENTRY LOGIC
+            # ENTRY LOGIC (Phase 2: Simplified to core trend theory)
             # ===================================
+            # Statistical basis: Trend-following is based on momentum factor research
+            # showing that assets with positive momentum continue outperforming.
+            # Reference: "Momentum" by Jegadeesh & Titman (1993), ADX by Wilder (1978)
             if not self._in_trend[symbol]:
-                # Condition 1: Strong trend (ADX > 25)
-                strong_trend = adx > self.adx_strong_trend
+                # CORE CONDITION 1: ADX shows trending market
+                trending_market = adx > self.adx_strong_trend
 
-                # Condition 2: Supertrend bullish OR (if unavailable) use EMA alignment as proxy
-                # This fixes the NaN issue where Supertrend wasn't computing properly
-                if supertrend_available:
-                    bullish_supertrend = supertrend_direction > 0
-                else:
-                    # Fallback: Use EMA alignment + price above fast EMA as bullish signal
-                    bullish_supertrend = (ema_fast > ema_slow) and (current_price > ema_fast)
-
-                # Condition 3: Fast EMA above slow EMA (trend alignment)
+                # CORE CONDITION 2: EMA alignment (trend direction)
+                # Fast EMA above slow EMA = uptrend
                 emas_aligned = ema_fast > ema_slow
 
-                # Condition 4: Price above VWAP (institutional support)
-                above_vwap = current_price > vwap
+                # CORE CONDITION 3: Price above fast EMA (in the trend)
+                price_in_trend = current_price > ema_fast
 
-                # Condition 5: +DI > -DI (bullish directional movement)
-                bullish_di = (not np.isnan(plus_di) and not np.isnan(minus_di) and
-                             plus_di > minus_di)
+                # OPTIONAL: Supertrend confirmation OR +DI > -DI
+                # Either one provides additional confirmation
+                if supertrend_available:
+                    trend_confirmed = supertrend_direction > 0
+                elif not np.isnan(plus_di) and not np.isnan(minus_di):
+                    trend_confirmed = plus_di > minus_di
+                else:
+                    trend_confirmed = True  # Allow entry if no confirmation available
 
-                # ALL conditions must be met
-                if (strong_trend and bullish_supertrend and emas_aligned and
-                    above_vwap and bullish_di):
+                # Entry: 3 core conditions + optional confirmation
+                # Removed VWAP requirement (too restrictive)
+                if trending_market and emas_aligned and price_in_trend and trend_confirmed:
                     self._in_trend[symbol] = True
                     self._entry_prices[symbol] = current_price
                     # Create trailing stop for this position

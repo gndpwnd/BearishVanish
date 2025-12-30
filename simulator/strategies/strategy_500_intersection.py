@@ -153,43 +153,44 @@ class Strategy(StrategyBase):
             cooldown_passed = bars_since_last_signal >= self.cooldown_bars
 
             # ===================================
-            # BUY SIGNAL
+            # BUY SIGNAL (Phase 2: Simplified relative strength logic)
             # ===================================
-            # Stock crossed BELOW S&P, slope reverses from - to +
-            # Use cooldown instead of one-signal-per-cross to allow more trades
-            if (self._last_cross_was_below[symbol] and cooldown_passed and not self._in_position[symbol]):
+            # Statistical basis: Relative strength reversion
+            # When a stock underperforms and starts recovering, it may mean-revert
+            # Reference: "On Persistence in Mutual Fund Performance" by Carhart (1997)
+            if cooldown_passed and not self._in_position[symbol]:
+                # Original pattern: crossover + slope reversal
+                original_buy = (self._last_cross_was_below[symbol] and
+                               prev_slope < 0 and curr_slope > 0 and currently_below_sp500)
 
-                if (prev_slope < 0 and curr_slope > 0 and currently_below_sp500):
+                # Phase 2 SIMPLE pattern: Stock underperforming but slope turning positive
+                # This is based on relative strength reversion theory
+                simple_buy = (currently_below_sp500 and curr_slope > 0 and
+                             stock_cum[current_idx] < stock_cum[current_idx - 1] * 1.02)  # Was flat/down
+
+                # Enter if EITHER pattern matches
+                if original_buy or simple_buy:
                     self._last_signal_bar[symbol] = bar_index
                     self._in_position[symbol] = True
                     self._entry_prices[symbol] = current_price
-
-                    # ATR-based Position Sizing (from indicator_atr.py):
-                    # The ATR value can be used to scale position size inversely
-                    # with volatility. Higher ATR = smaller position, lower ATR = larger position.
-                    #
-                    # Example implementation (for future enhancement):
-                    #   atr = data.get('atr', pd.Series([np.nan] * len(data))).iloc[-1]
-                    #   if not np.isnan(atr) and atr > 0:
-                    #       # Scale position_size by 1/ATR for volatility adjustment
-                    #       # base_position_size * (target_atr / current_atr)
-                    #       volatility_factor = target_atr / atr
-                    #       adjusted_position_size = base_position_size * volatility_factor
-                    #
-                    # This ensures consistent risk across varying market conditions.
-
                     return 'BUY'
 
             # ===================================
             # SELL SIGNAL
             # ===================================
-            # Stock crossed ABOVE S&P, slope reverses from + to -
-            # Use cooldown for sell signals too
-            elif (self._last_cross_was_below[symbol] is not None and
-                  not self._last_cross_was_below[symbol] and
-                  cooldown_passed and self._in_position[symbol]):
+            # Exit when in position and:
+            # 1. Slope turns negative (momentum lost)
+            # 2. Stock outperforms S&P (mean reversion complete)
+            if self._in_position[symbol] and cooldown_passed:
+                # Original sell: crossover + slope reversal
+                original_sell = (self._last_cross_was_below[symbol] is not None and
+                                not self._last_cross_was_below[symbol] and
+                                prev_slope > 0 and curr_slope < 0 and not currently_below_sp500)
 
-                if (prev_slope > 0 and curr_slope < 0 and not currently_below_sp500):
+                # Simple sell: Now outperforming S&P (goal achieved) or slope negative
+                simple_sell = not currently_below_sp500 or curr_slope < -0.5
+
+                if original_sell or simple_sell:
                     self._last_signal_bar[symbol] = bar_index
                     self._in_position[symbol] = False
                     self._entry_prices[symbol] = None

@@ -136,22 +136,38 @@ class Strategy(StrategyBase):
             bars_since_last_signal = bar_index - self._last_signal_bar[symbol]
             cooldown_passed = bars_since_last_signal >= self.cooldown_bars
 
-            # BUY: Stock crossed BELOW S&P, slope reverses from - to +
-            # Use cooldown instead of one-signal-per-cross to allow more trades
-            if (self._last_cross_was_below[symbol] and cooldown_passed and not self._in_position[symbol]):
+            # ===================================
+            # BUY SIGNAL (Phase 2: Simplified with relative strength theory)
+            # ===================================
+            # Statistical basis: Relative strength reversion - underperformers with
+            # improving momentum tend to mean-revert toward the benchmark
+            if cooldown_passed and not self._in_position[symbol]:
+                # Original pattern: crossover + slope reversal
+                original_buy = (self._last_cross_was_below[symbol] and
+                               prev_slope < 0 and curr_slope > 0 and currently_below)
 
-                if (prev_slope < 0 and curr_slope > 0 and currently_below):
+                # Phase 2 SIMPLE pattern: Stock below S&P but momentum improving
+                simple_buy = currently_below and curr_slope > 0
+
+                if original_buy or simple_buy:
                     self._last_signal_bar[symbol] = bar_index
                     self._in_position[symbol] = True
                     self._entry_prices[symbol] = current_price
                     return 'BUY'
 
-            # SELL: Stock crossed ABOVE S&P, slope reverses from + to -
-            elif (self._last_cross_was_below[symbol] is not None and
-                  not self._last_cross_was_below[symbol] and
-                  cooldown_passed and self._in_position[symbol]):
+            # ===================================
+            # SELL SIGNAL
+            # ===================================
+            if self._in_position[symbol] and cooldown_passed:
+                # Original sell pattern
+                original_sell = (self._last_cross_was_below[symbol] is not None and
+                                not self._last_cross_was_below[symbol] and
+                                prev_slope > 0 and curr_slope < 0 and currently_above)
 
-                if (prev_slope > 0 and curr_slope < 0 and currently_above):
+                # Simple sell: Outperforming S&P or momentum lost
+                simple_sell = currently_above or curr_slope < -0.5
+
+                if original_sell or simple_sell:
                     self._last_signal_bar[symbol] = bar_index
                     self._in_position[symbol] = False
                     self._entry_prices[symbol] = None

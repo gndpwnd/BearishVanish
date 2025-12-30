@@ -60,7 +60,7 @@ class Strategy(StrategyBase):
         self.required_indicators = [
             'adx',
             'atr',  # Used for dynamic stop-loss calculation
-            'ema',
+            f'ema_{self.exit_ema_period}',  # ema_10 for exit signal
             'vwap',
             'relative_volume'
         ]
@@ -99,9 +99,10 @@ class Strategy(StrategyBase):
             vwap = data.get('vwap', pd.Series([current_price] * len(data))).iloc[-1]
             rel_volume = data.get('relative_volume', pd.Series([1.0] * len(data))).iloc[-1]
 
-            # Calculate 20-day high (breakout level)
-            if len(data) >= self.breakout_period:
-                high_20d = data['high'].iloc[-self.breakout_period:].max()
+            # Calculate 20-day high (breakout level) - EXCLUDE current bar
+            # We want to check if CURRENT bar breaks above the PREVIOUS 20 bars
+            if len(data) >= self.breakout_period + 1:
+                high_20d = data['high'].iloc[-self.breakout_period-1:-1].max()
             else:
                 return 'HOLD'
 
@@ -141,35 +142,33 @@ class Strategy(StrategyBase):
                     return 'SELL'
 
             # ===================================
-            # ENTRY LOGIC
+            # ENTRY LOGIC (Phase 2: Simplified to core breakout theory)
             # ===================================
+            # Statistical basis: Price breaking above recent highs often leads to
+            # continuation moves, especially with volume confirmation.
+            # Reference: "Momentum" by Jegadeesh & Titman (1993)
             if not self._in_breakout[symbol]:
-                # Condition 1: Price breaks above 20-day high
+                # CORE CONDITION: Price breaks above 20-day high (essential)
                 breakout = current_high > high_20d
 
-                # Condition 2: Volume surge (institutional participation)
-                volume_surge = rel_volume > self.volume_breakout_threshold
-
-                # Condition 3: ADX shows momentum building
-                momentum_building = adx > self.adx_threshold
-
-                # Condition 4: Price above VWAP (quality breakout, not fake)
-                above_vwap = current_price > vwap
-
-                # Condition 5: Ensure it's a NEW breakout (not already broken out)
-                # Check that previous bar was BELOW the breakout level
+                # Ensure it's a NEW breakout (not already broken out)
                 if len(data) >= 2:
                     prev_high = data['high'].iloc[-2]
                     new_breakout = prev_high <= high_20d
                 else:
                     new_breakout = False
 
-                # ALL conditions must be met
-                if (breakout and volume_surge and momentum_building and
-                    above_vwap and new_breakout):
+                # CONFIRMATION: Either volume OR momentum (not both required)
+                # This is based on sound theory - breakouts need some confirmation
+                volume_confirmation = rel_volume > self.volume_breakout_threshold
+                momentum_confirmation = adx > self.adx_threshold
+
+                # Entry: Breakout + new + (volume OR momentum)
+                # Removed VWAP requirement as it was too restrictive
+                if breakout and new_breakout and (volume_confirmation or momentum_confirmation):
                     self._in_breakout[symbol] = True
                     self._breakout_level[symbol] = high_20d
-                    self._entry_atr[symbol] = atr
+                    self._entry_atr[symbol] = atr if not np.isnan(atr) else current_price * 0.02
                     return 'BUY'
 
         except Exception as e:

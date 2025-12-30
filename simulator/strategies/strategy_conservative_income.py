@@ -39,8 +39,8 @@ class Strategy(StrategyBase):
 
         super().__init__(config)
 
-        # RELAXED thresholds for more signals
-        self.rsi_oversold = 35  # Was 30, now 35 (easier to trigger)
+        # Phase 2: Further relaxed thresholds for more signals
+        self.rsi_oversold = 40  # Was 35, now 40 (much easier to trigger)
         self.rsi_overbought = 65  # Was 70, now 65 (exit earlier)
         self.rsi_period = 14
 
@@ -48,8 +48,8 @@ class Strategy(StrategyBase):
         self.bb_period = 20
         self.bb_std = 2.0
 
-        # Volume (RELAXED)
-        self.volume_threshold = 1.1  # Was 1.5, now 1.1 (easier to meet)
+        # Volume (RELAXED to 1.0 - essentially any volume)
+        self.volume_threshold = 1.0  # Was 1.1, now 1.0 (no volume filter)
 
         # TIGHT risk management
         self.stop_loss_pct = 0.03  # 3% stop-loss (TIGHT!)
@@ -151,43 +151,32 @@ class Strategy(StrategyBase):
                     return 'SELL'  # Take quick profit
 
             # ===================================
-            # ENTRY LOGIC (multiple conditions, use OR)
+            # ENTRY LOGIC (Phase 2: Simplified patterns, no trend filter)
             # ===================================
             if not self._in_position[symbol]:
-                # Relaxed trend filter: Check if 20-SMA is rising (uptrend without requiring price > sma_50)
-                # The old filter (price > sma_50) was contradicting the oversold bounce pattern
-                # because when price is at bb_lower, it's usually BELOW sma_50
-                if len(data) >= 3:
-                    sma_20_prev = data.get('sma_20', pd.Series([np.nan] * len(data))).iloc[-3]
-                    sma_rising = not np.isnan(sma_20_prev) and sma_20 > sma_20_prev
-                else:
-                    sma_rising = True  # Allow entry if not enough data to check
-
-                # ENTRY PATTERN 1: Oversold bounce
-                # - Price near/below BB lower
-                # - RSI oversold (<35)
-                # - Some volume
-                price_near_lower = current_price <= bb_lower * 1.01  # Within 1% of lower band
+                # ENTRY PATTERN 1: Oversold bounce (price near BB lower)
+                price_near_lower = current_price <= bb_lower * 1.03  # Within 3% of lower band
                 rsi_oversold = rsi < self.rsi_oversold
-                volume_ok = rel_volume > self.volume_threshold
+                pattern_1 = price_near_lower and rsi_oversold
 
-                pattern_1 = price_near_lower and rsi_oversold and volume_ok
+                # ENTRY PATTERN 2: RSI very oversold (< 30) - instant entry
+                pattern_2 = rsi < 30
 
-                # ENTRY PATTERN 2: Momentum entry
-                # - Price crosses above 20-SMA
-                # - RSI in sweet spot (35-50)
-                # - Some volume
-                prev_price = data['close'].iloc[-2]
-                prev_sma = data.get('sma_20', pd.Series([np.nan] * len(data))).iloc[-2]
+                # ENTRY PATTERN 3: Price crosses above 20-SMA with any RSI < 50
+                if len(data) >= 2 and not np.isnan(sma_20):
+                    prev_price = data['close'].iloc[-2]
+                    prev_sma = data.get('sma_20', pd.Series([np.nan] * len(data))).iloc[-2]
+                    if not np.isnan(prev_sma):
+                        crosses_above_sma = (prev_price <= prev_sma and current_price > sma_20)
+                        rsi_ok = rsi < 50
+                        pattern_3 = crosses_above_sma and rsi_ok
+                    else:
+                        pattern_3 = False
+                else:
+                    pattern_3 = False
 
-                crosses_above_sma = (prev_price <= prev_sma and current_price > sma_20)
-                rsi_sweet_spot = 35 < rsi < 50
-                volume_ok_2 = rel_volume > self.volume_threshold
-
-                pattern_2 = crosses_above_sma and rsi_sweet_spot and volume_ok_2
-
-                # Enter if EITHER pattern matches AND trend is favorable
-                if (pattern_1 or pattern_2) and sma_rising:
+                # Enter if ANY pattern matches (no trend filter needed)
+                if pattern_1 or pattern_2 or pattern_3:
                     self._in_position[symbol] = True
                     self._entry_prices[symbol] = current_price
                     self._entry_dates[symbol] = current_date
