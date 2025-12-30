@@ -15,6 +15,11 @@
 # Examples:
 #   ./run_complete_pipeline.sh sp500 --offline  # Use cached data
 #   ./run_complete_pipeline.sh sp500 --download # Download fresh data first
+#
+# ALTERNATIVE: For a simpler unified pipeline, use run_strategy_test_hpc.sh
+#   This alternative script uses run_strategy_test.py which combines all steps:
+#   ./run_strategy_test_hpc.sh sp500 48    # Universe, Workers
+#   See run_strategy_test_hpc.sh for details.
 # ============================================================================
 
 set -e
@@ -194,4 +199,14 @@ echo ""
 echo "4. Document findings in: ${PROJECT_DIR}/docs/Findings/"
 echo ""
 echo "5. Update strategies based on insights and re-run pipeline"
+echo ""
+echo ""
+echo -e "${CYAN}Alternative Workflow:${NC}"
+echo ""
+echo "For future runs, you can use the unified strategy test script:"
+echo "  ./hpc_scripts/run_strategy_test_hpc.sh sp500 48"
+echo ""
+echo "This uses run_strategy_test.py which combines simulation, analysis,"
+echo "and report generation into a single Python-driven pipeline with"
+echo "timestamped output folders and comprehensive test summaries."
 echo ""

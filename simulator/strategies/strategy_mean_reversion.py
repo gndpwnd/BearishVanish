@@ -133,11 +133,12 @@ class Strategy(StrategyBase):
                 # Condition 3: Volume spike (institutional confirmation)
                 volume_spike = rel_volume > self.volume_threshold
 
-                # Condition 4: Price above VWAP (quality entry)
-                above_vwap = current_price > vwap
+                # Note: Removed VWAP requirement - it was a logical contradiction
+                # When price < bb_lower (oversold), price is almost never > VWAP
+                # This was preventing all trades from triggering
 
-                # ALL conditions must be met
-                if price_oversold and rsi_oversold and volume_spike and above_vwap:
+                # ALL conditions must be met (3 conditions, VWAP removed)
+                if price_oversold and rsi_oversold and volume_spike:
                     self._position_state[symbol] = True
                     self._entry_prices[symbol] = current_price
                     return 'BUY'

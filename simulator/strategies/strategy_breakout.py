@@ -10,7 +10,7 @@ Used by momentum funds like Citadel and DE Shaw:
 
 Entry Signals:
 - Price breaks above 20-day high
-- Volume > 1.5x average (institutional participation)
+- Volume > 1.2x average (institutional participation)
 - ADX > 20 (momentum building)
 - Price > VWAP (quality breakout)
 
@@ -48,16 +48,18 @@ class Strategy(StrategyBase):
         # Strategy parameters
         self.breakout_period = 20  # 20-day high
         self.exit_ema_period = 10
-        self.volume_breakout_threshold = 1.5
+        self.volume_breakout_threshold = 1.2  # Reduced from 1.5 to 1.2 for more signals
         self.volume_exit_threshold = 0.8
         self.adx_threshold = 20
         self.atr_period = 14
         self.atr_stop_multiplier = 2.0
 
         # Required indicators
+        # Note: 'atr' loads from indicator_atr.py (Numba JIT optimized)
+        # Note: 'adx' loads from indicator_adx.py (Numba JIT optimized)
         self.required_indicators = [
             'adx',
-            'atr',
+            'atr',  # Used for dynamic stop-loss calculation
             'ema',
             'vwap',
             'relative_volume'
@@ -111,7 +113,9 @@ class Strategy(StrategyBase):
             # EXIT LOGIC (check first)
             # ===================================
             if self._in_breakout[symbol]:
+                # Dynamic stop-loss using ATR (from indicator_atr.py)
                 # Stop-loss: price drops below breakout level - 2×ATR
+                # This allows stops to adapt to market volatility
                 breakout_level = self._breakout_level[symbol]
                 entry_atr = self._entry_atr[symbol]
                 stop_loss = breakout_level - (entry_atr * self.atr_stop_multiplier)

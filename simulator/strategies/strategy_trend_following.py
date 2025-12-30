@@ -28,6 +28,7 @@ Risk Controls:
 import pandas as pd
 import numpy as np
 from strategy_base import StrategyBase, StrategyConfig
+from trailing_stop import TrailingStop
 
 
 class Strategy(StrategyBase):
@@ -40,10 +41,14 @@ class Strategy(StrategyBase):
                 color="#4ECDC4",
                 initial_capital=100000,
                 position_size_pct=0.10,  # 10% per position
-                max_positions=8
+                max_positions=8,
+                stop_loss_pct=0.08  # 8% stop-loss
             )
 
         super().__init__(config)
+
+        # Stop-loss parameter (use config or default 8%)
+        self.stop_loss_pct = self.config.stop_loss_pct if self.config.stop_loss_pct else 0.08
 
         # Strategy parameters
         self.adx_period = 14
@@ -64,6 +69,11 @@ class Strategy(StrategyBase):
 
         # Track position state
         self._in_trend = {}
+        self._entry_prices = {}  # Track entry prices for stop-loss
+        self._trailing_stops = {}  # Track trailing stops per symbol
+
+        # Trailing stop parameters
+        self.trail_pct = 0.05  # 5% trailing distance
 
     def generate_signal(self, symbol, data, spy_data, bar_index):
         """
@@ -80,6 +90,8 @@ class Strategy(StrategyBase):
         # Initialize tracking
         if symbol not in self._in_trend:
             self._in_trend[symbol] = False
+            self._entry_prices[symbol] = None
+            self._trailing_stops[symbol] = None
 
         try:
             current_price = data['close'].iloc[-1]
@@ -101,28 +113,50 @@ class Strategy(StrategyBase):
             # VWAP
             vwap = data.get('vwap', pd.Series([current_price] * len(data))).iloc[-1]
 
-            # Check for NaN values
-            if (np.isnan(adx) or np.isnan(supertrend_value) or
-                np.isnan(ema_fast) or np.isnan(ema_slow)):
+            # Check for NaN values in essential indicators (ADX, EMAs)
+            # Supertrend can be NaN - we'll use EMA alignment as fallback
+            if np.isnan(adx) or np.isnan(ema_fast) or np.isnan(ema_slow):
                 return 'HOLD'
+
+            # Supertrend is optional - if NaN, use EMA alignment as proxy
+            supertrend_available = not np.isnan(supertrend_value) and not np.isnan(supertrend_direction)
 
             # ===================================
             # EXIT LOGIC (check first)
             # ===================================
             if self._in_trend[symbol]:
-                # Exit if Supertrend turns bearish
-                if not np.isnan(supertrend_direction) and supertrend_direction < 0:
+                # TRAILING STOP CHECK (check first)
+                trailing_stop = self._trailing_stops[symbol]
+                if trailing_stop is not None:
+                    # Update trailing stop with current price
+                    trailing_stop.update(current_price)
+
+                    # Check if stopped out
+                    if trailing_stop.is_stopped(current_price):
+                        self._in_trend[symbol] = False
+                        self._entry_prices[symbol] = None
+                        self._trailing_stops[symbol] = None
+                        return 'SELL'
+
+                # Exit if Supertrend turns bearish (only if available)
+                if supertrend_available and supertrend_direction < 0:
                     self._in_trend[symbol] = False
+                    self._entry_prices[symbol] = None
+                    self._trailing_stops[symbol] = None
                     return 'SELL'
 
                 # Exit if trend weakens (ADX drops below threshold)
                 if adx < self.adx_weak_trend:
                     self._in_trend[symbol] = False
+                    self._entry_prices[symbol] = None
+                    self._trailing_stops[symbol] = None
                     return 'SELL'
 
                 # Exit if price drops below fast EMA (trend break)
                 if current_price < ema_fast:
                     self._in_trend[symbol] = False
+                    self._entry_prices[symbol] = None
+                    self._trailing_stops[symbol] = None
                     return 'SELL'
 
             # ===================================
@@ -132,8 +166,13 @@ class Strategy(StrategyBase):
                 # Condition 1: Strong trend (ADX > 25)
                 strong_trend = adx > self.adx_strong_trend
 
-                # Condition 2: Supertrend bullish
-                bullish_supertrend = not np.isnan(supertrend_direction) and supertrend_direction > 0
+                # Condition 2: Supertrend bullish OR (if unavailable) use EMA alignment as proxy
+                # This fixes the NaN issue where Supertrend wasn't computing properly
+                if supertrend_available:
+                    bullish_supertrend = supertrend_direction > 0
+                else:
+                    # Fallback: Use EMA alignment + price above fast EMA as bullish signal
+                    bullish_supertrend = (ema_fast > ema_slow) and (current_price > ema_fast)
 
                 # Condition 3: Fast EMA above slow EMA (trend alignment)
                 emas_aligned = ema_fast > ema_slow
@@ -149,6 +188,13 @@ class Strategy(StrategyBase):
                 if (strong_trend and bullish_supertrend and emas_aligned and
                     above_vwap and bullish_di):
                     self._in_trend[symbol] = True
+                    self._entry_prices[symbol] = current_price
+                    # Create trailing stop for this position
+                    self._trailing_stops[symbol] = TrailingStop(
+                        entry_price=current_price,
+                        initial_stop_pct=self.stop_loss_pct,
+                        trail_pct=self.trail_pct
+                    )
                     return 'BUY'
 
         except Exception as e:
@@ -166,6 +212,8 @@ class Strategy(StrategyBase):
             'supertrend_period': self.supertrend_period,
             'supertrend_multiplier': self.supertrend_multiplier,
             'ema_fast': self.ema_fast,
-            'ema_slow': self.ema_slow
+            'ema_slow': self.ema_slow,
+            'stop_loss_pct': self.stop_loss_pct,
+            'trail_pct': self.trail_pct
         })
         return base_config

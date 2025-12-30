@@ -107,7 +107,7 @@ class Strategy(StrategyBase):
             rel_volume = data.get('relative_volume', pd.Series([1.0] * len(data))).iloc[-1]
 
             # Check for NaN
-            if np.isnan(bb_lower) or np.isnan(sma_20) or np.isnan(sma_50):
+            if np.isnan(bb_lower) or np.isnan(sma_20):
                 return 'HOLD'
 
             # ===================================
@@ -154,11 +154,14 @@ class Strategy(StrategyBase):
             # ENTRY LOGIC (multiple conditions, use OR)
             # ===================================
             if not self._in_position[symbol]:
-                # Trend filter: Only long if above 50-SMA (reduces losing trades)
-                above_50_sma = current_price > sma_50
-
-                if not above_50_sma:
-                    return 'HOLD'  # Don't fight the trend
+                # Relaxed trend filter: Check if 20-SMA is rising (uptrend without requiring price > sma_50)
+                # The old filter (price > sma_50) was contradicting the oversold bounce pattern
+                # because when price is at bb_lower, it's usually BELOW sma_50
+                if len(data) >= 3:
+                    sma_20_prev = data.get('sma_20', pd.Series([np.nan] * len(data))).iloc[-3]
+                    sma_rising = not np.isnan(sma_20_prev) and sma_20 > sma_20_prev
+                else:
+                    sma_rising = True  # Allow entry if not enough data to check
 
                 # ENTRY PATTERN 1: Oversold bounce
                 # - Price near/below BB lower
@@ -183,8 +186,8 @@ class Strategy(StrategyBase):
 
                 pattern_2 = crosses_above_sma and rsi_sweet_spot and volume_ok_2
 
-                # Enter if EITHER pattern matches
-                if pattern_1 or pattern_2:
+                # Enter if EITHER pattern matches AND trend is favorable
+                if (pattern_1 or pattern_2) and sma_rising:
                     self._in_position[symbol] = True
                     self._entry_prices[symbol] = current_price
                     self._entry_dates[symbol] = current_date

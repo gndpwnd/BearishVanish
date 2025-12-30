@@ -36,6 +36,16 @@ from calculators.volume_metrics import VolumeMetricsCalculator
 # Import processors
 from processors.chart_processor import ChartProcessor
 
+# Import progress reporter for API monitoring
+try:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from monitoring.progress_reporter import get_reporter
+    MONITORING_AVAILABLE = True
+except ImportError:
+    MONITORING_AVAILABLE = False
+    get_reporter = None
+
 
 class AnalysisEngine:
     """
@@ -66,7 +76,17 @@ class AnalysisEngine:
         
         # Connect to analysis database with UTF-8 safety
         self.conn = get_utf8_connection(str(self.analysis_db_path))
-        
+
+        # Initialize progress reporter for API monitoring
+        self.reporter = None
+        self.process_id = None
+        if MONITORING_AVAILABLE:
+            try:
+                self.reporter = get_reporter()
+            except Exception as e:
+                print(f"   Warning: Could not initialize progress reporting: {e}")
+                self.reporter = None
+
         print(f"📊 ANALYSIS ENGINE")
         print(f"   Input:  {self.sim_db_path.name}")
         print(f"   Output: {self.analysis_db_path.name}")
@@ -89,46 +109,97 @@ class AnalysisEngine:
     def run_analysis(self):
         """
         Run complete analysis pipeline
-        
+
         Returns:
             Path: Path to created analysis database
         """
         start_time = time.time()
-        
+
         # Get all strategies
         strategies = self.reader.list_strategies()
-        
+
         if not strategies:
             print("❌ No strategies found in simulation database")
             return None
-        
+
         print(f"\n📈 Found {len(strategies)} strategies:")
         for strat in strategies:
             print(f"   • {strat}")
+
+        # Register analysis process with monitoring API
+        # Total items: strategies + benchmark analysis + metadata + optimization = len(strategies) + 3
+        total_steps = len(strategies) + 3
+        if self.reporter:
+            try:
+                self.process_id = self.reporter.register(
+                    process_type="analysis",
+                    total_items=total_steps,
+                    metadata={
+                        "simulation_db": str(self.sim_db_path.name),
+                        "num_strategies": len(strategies),
+                        "strategies": strategies
+                    }
+                )
+            except Exception:
+                pass  # Silently fail for registration
         
         # Analyze each strategy
         for i, strategy_name in enumerate(strategies, 1):
             print(f"\n[{i}/{len(strategies)}] Analyzing: {strategy_name}")
             self._analyze_strategy(strategy_name)
-        
+
+            # Report progress to monitoring API
+            if self.reporter and self.process_id:
+                try:
+                    self.reporter.update(i, f"Analyzed {strategy_name}")
+                except Exception:
+                    pass  # Silently fail for progress updates
+
         # Also analyze SPY benchmark if available
         try:
             self._analyze_benchmark()
+            # Report benchmark analysis progress
+            if self.reporter and self.process_id:
+                try:
+                    self.reporter.update(len(strategies) + 1, "SPY benchmark analyzed")
+                except Exception:
+                    pass
         except Exception as e:
             print(f"⚠️  Could not analyze SPY benchmark: {e}")
         
         # Store metadata
         self._store_metadata()
-        
+
+        # Report metadata stored progress
+        if self.reporter and self.process_id:
+            try:
+                self.reporter.update(len(strategies) + 2, "Metadata stored")
+            except Exception:
+                pass
+
         # Optimize database
         self._optimize_database()
-        
+
+        # Report database optimization progress
+        if self.reporter and self.process_id:
+            try:
+                self.reporter.update(len(strategies) + 3, "Database optimized")
+            except Exception:
+                pass
+
         # Close connections
         self.conn.close()
         self.reader.close()
-        
+
         elapsed = time.time() - start_time
-        
+
+        # Mark analysis complete in monitoring API
+        if self.reporter and self.process_id:
+            try:
+                self.reporter.complete(f"Analysis completed in {elapsed:.1f}s")
+            except Exception:
+                pass  # Silently fail for completion
+
         print(f"\n{'='*70}")
         print(f"✅ Analysis Complete!")
         print(f"   Time: {elapsed:.1f} seconds")
@@ -137,7 +208,7 @@ class AnalysisEngine:
         print(f"\n📊 To visualize:")
         print(f"   cd ../visualizer && python main.py")
         print(f"{'='*70}\n")
-        
+
         return self.analysis_db_path
     
     def _analyze_strategy(self, strategy_name):

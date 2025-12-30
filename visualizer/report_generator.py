@@ -334,24 +334,26 @@ class MarkdownReportGenerator:
             perf = self.reader.get_stock_performance(strategy_name)
             if perf is None or perf.empty:
                 return ""
-            
+
             output = StringIO()
             output.write("## Top Performing Stocks\n\n")
-            
-            # Sort by return
-            top_stocks = perf.nlargest(10, 'return_pct')
-            
-            output.write("| Stock | Return % | Trades | Avg Trade Return % |\n")
-            output.write("|-------|----------|--------|--------------------|\n")
-            
+
+            # Sort by net_profit_loss (total P&L for the stock)
+            # The schema has: net_profit_loss, avg_return_pct, total_trades
+            top_stocks = perf.nlargest(10, 'net_profit_loss')
+
+            output.write("| Stock | Net P&L | Trades | Avg Return % | Win Rate % |\n")
+            output.write("|-------|---------|--------|--------------|------------|\n")
+
             for _, row in top_stocks.iterrows():
                 symbol = str(row.get('symbol', 'N/A'))
-                return_pct = float(row.get('return_pct', 0)) if pd.notna(row.get('return_pct')) else 0
-                trades = int(row.get('num_trades', 0)) if pd.notna(row.get('num_trades')) else 0
-                avg_ret = return_pct / max(trades, 1)
-                
-                output.write(f"| {symbol} | {return_pct:+.2f}% | {trades} | {avg_ret:+.2f}% |\n")
-            
+                net_pnl = float(row.get('net_profit_loss', 0)) if pd.notna(row.get('net_profit_loss')) else 0
+                trades = int(row.get('total_trades', 0)) if pd.notna(row.get('total_trades')) else 0
+                avg_ret = float(row.get('avg_return_pct', 0)) if pd.notna(row.get('avg_return_pct')) else 0
+                win_rate = float(row.get('win_rate_pct', 0)) if pd.notna(row.get('win_rate_pct')) else 0
+
+                output.write(f"| {symbol} | ${net_pnl:+,.0f} | {trades} | {avg_ret:+.2f}% | {win_rate:.1f}% |\n")
+
             output.write("\n")
             return output.getvalue()
         except Exception as e:

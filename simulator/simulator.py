@@ -39,6 +39,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Execution configuration
+SLIPPAGE_PCT = 0.001  # 0.1% slippage per trade
+EXECUTION_DELAY = True  # If True, execute at next bar's open (not implemented yet, use slippage for now)
+
 def print_simulation_progress(completed, total, current_strategy=None, current_symbol=None):
     """Print clean progress updates"""
     progress_pct = (completed / total * 100) if total > 0 else 0
@@ -314,7 +318,7 @@ def run_single_strategy_on_symbol(strategy_name: str,
             
             # Get historical data up to current bar (no future data!)
             historical_data = stock_data.iloc[:i+1]
-            historical_spy = spy_data.iloc[:i+1] if i < len(spy_data) else spy_data
+            historical_spy = spy_data.iloc[:i+1] if spy_data is not None and i < len(spy_data) else spy_data
             
             # Strategy generates signal (with pre-computed indicators)
             signal = strategy.generate_signal(
@@ -379,10 +383,23 @@ def run_single_strategy_on_symbol(strategy_name: str,
             # Execute trade
             if signal in ['BUY', 'SELL']:
                 volume = stock_data['volume'].iloc[i] if 'volume' in stock_data.columns else 0
-                
-                # Execute trade in tracker
+
+                # Slippage simulates real-world execution costs:
+                # - Market impact: large orders move price against you
+                # - Bid-ask spread: you pay ask, sell at bid
+                # - Timing: signal at close means execution at open (gap risk)
+
+                # Apply slippage to execution price
+                if signal == 'BUY':
+                    execution_price = current_price * (1 + SLIPPAGE_PCT)  # Pay more when buying
+                elif signal == 'SELL':
+                    execution_price = current_price * (1 - SLIPPAGE_PCT)  # Receive less when selling
+                else:
+                    execution_price = current_price
+
+                # Execute at slippage-adjusted price
                 trade_success = tracker.execute_trade(
-                    symbol, signal, current_price, current_date,
+                    symbol, signal, execution_price, current_date,
                     volume=volume
                 )
                 

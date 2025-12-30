@@ -40,7 +40,7 @@ class RiskMetricsCalculator(BaseCalculator):
         metrics = {
             # Volatility
             'volatility_annual_pct': self._annualized_volatility(returns),
-            'downside_deviation_pct': self._downside_deviation(returns),
+            'downside_deviation_pct': self._downside_deviation(returns) * 100,
             
             # Risk-adjusted returns
             'sharpe_ratio': self._sharpe_ratio(returns),
@@ -81,12 +81,15 @@ class RiskMetricsCalculator(BaseCalculator):
     def _downside_deviation(self, returns, target=0.0):
         """
         Calculate downside deviation (semi-deviation).
-        Only considers returns below the target.
+        Uses all returns, with zero contribution for returns above target.
+
+        Returns downside deviation as a decimal (not percentage).
         """
-        downside = returns[returns < target]
-        if len(downside) == 0:
-            return 0
-        return np.sqrt(np.mean(downside ** 2)) * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
+        if len(returns) == 0:
+            return 0.0
+        excess = returns - target
+        downside_sq = np.where(excess < 0, excess ** 2, 0)
+        return np.sqrt(np.mean(downside_sq)) * np.sqrt(TRADING_DAYS_PER_YEAR)
 
     def _sharpe_ratio(self, returns):
         """
@@ -116,6 +119,7 @@ class RiskMetricsCalculator(BaseCalculator):
         Calculate Sortino ratio.
 
         Like Sharpe but uses downside deviation instead of total std.
+        Both numerator and denominator use decimal units (not percentage).
         """
         if len(returns) == 0:
             return 0
@@ -126,8 +130,8 @@ class RiskMetricsCalculator(BaseCalculator):
         # Excess returns
         excess_returns = returns - daily_rf
 
-        # Downside deviation (already annualized, in %)
-        downside_dev = self._downside_deviation(returns, target_return) / 100
+        # Downside deviation (already annualized, in decimal)
+        downside_dev = self._downside_deviation(returns, target_return)
 
         if downside_dev == 0:
             return 0
@@ -140,21 +144,22 @@ class RiskMetricsCalculator(BaseCalculator):
         """Calculate Calmar ratio"""
         if not self.performance:
             return 0
-        
+
         total_return = self.performance.get('total_return_pct', 0)
         max_dd = self.performance.get('max_drawdown_pct', 0)
-        
-        if max_dd == 0:
-            return 0
-        
+
         # Annualize return
         days = self.get_trading_days()
         if days == 0:
             return 0
-        
-        annual_return = (total_return / 100 + 1) ** (252 / days) - 1
+
+        annual_return = (total_return / 100 + 1) ** (TRADING_DAYS_PER_YEAR / days) - 1
         annual_return *= 100
-        
+
+        # Handle edge case when max_dd == 0
+        if max_dd == 0:
+            return float('inf') if annual_return > 0 else 0
+
         return annual_return / max_dd
     
     def _omega_ratio(self, returns, threshold=0.0):

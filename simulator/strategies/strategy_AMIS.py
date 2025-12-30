@@ -30,10 +30,18 @@ class Strategy(StrategyBase):
                 color="#96CEB4",
                 initial_capital=100000,
                 position_size_pct=0.08,
-                max_positions=12
+                max_positions=12,
+                stop_loss_pct=0.07  # 7% stop-loss
             )
-        
+
         super().__init__(config)
+
+        # Stop-loss parameter (use config or default 7%)
+        self.stop_loss_pct = self.config.stop_loss_pct if self.config.stop_loss_pct else 0.07
+
+        # Track entry prices and positions for stop-loss
+        self._entry_prices = {}
+        self._in_position = {}
         
         # ===================================
         # Strategy Parameters
@@ -114,44 +122,74 @@ class Strategy(StrategyBase):
         # Need minimum data
         if len(data) < max(self.slow_ma, self.trend_ma) + 1:
             return 'HOLD'
-        
+
+        # Initialize tracking for this symbol
+        if symbol not in self._in_position:
+            self._in_position[symbol] = False
+            self._entry_prices[symbol] = None
+
         # ===================================
-        # ACCESS PRE-COMPUTED INDICATORS
+        # ACCESS PRE-COMPUTED INDICATORS (with fallbacks)
         # ===================================
         try:
             # Current bar
             price = data['close'].iloc[-1]
-            
-            # Moving averages
-            fast_ma = data[f'sma_{self.fast_ma}'].iloc[-1]
-            slow_ma = data[f'sma_{self.slow_ma}'].iloc[-1]
-            trend_ma = data[f'sma_{self.trend_ma}'].iloc[-1]
-            
+
+            # Helper function to safely get indicator values with fallbacks
+            def get_indicator(name, fallback_names=None, default=np.nan):
+                """Try main column name, then fallbacks, then default."""
+                if name in data.columns:
+                    return data[name].iloc[-1]
+                if fallback_names:
+                    for fallback in fallback_names:
+                        if fallback in data.columns:
+                            return data[fallback].iloc[-1]
+                return default
+
+            def get_indicator_prev(name, fallback_names=None, default=np.nan):
+                """Get previous bar value for crossover detection."""
+                if name in data.columns and len(data) >= 2:
+                    return data[name].iloc[-2]
+                if fallback_names:
+                    for fallback in fallback_names:
+                        if fallback in data.columns and len(data) >= 2:
+                            return data[fallback].iloc[-2]
+                return default
+
+            # Moving averages - try specific period names, then generic names
+            fast_ma = get_indicator(f'sma_{self.fast_ma}', ['sma_20', 'sma'])
+            slow_ma = get_indicator(f'sma_{self.slow_ma}', ['sma_50', 'sma'])
+            trend_ma = get_indicator(f'sma_{self.trend_ma}', ['sma_200'])
+
             # Previous MAs for crossover
-            fast_ma_prev = data[f'sma_{self.fast_ma}'].iloc[-2]
-            slow_ma_prev = data[f'sma_{self.slow_ma}'].iloc[-2]
-            
-            # RSI
-            rsi = data[f'rsi_{self.rsi_period}'].iloc[-1]
-            
-            # Bollinger Bands
+            fast_ma_prev = get_indicator_prev(f'sma_{self.fast_ma}', ['sma_20', 'sma'])
+            slow_ma_prev = get_indicator_prev(f'sma_{self.slow_ma}', ['sma_50', 'sma'])
+
+            # RSI - try specific period, then generic
+            rsi = get_indicator(f'rsi_{self.rsi_period}', ['rsi_14', 'rsi'], 50.0)
+
+            # Bollinger Bands - try multiple naming conventions
             bb_col = f'bollinger_{self.bb_period}_{int(self.bb_std)}'
-            bb_upper = data[f'{bb_col}_upper'].iloc[-1]
-            bb_middle = data[f'{bb_col}_middle'].iloc[-1]
-            bb_lower = data[f'{bb_col}_lower'].iloc[-1]
-            
-            # Volume
-            rel_volume = data[f'relative_volume_{self.volume_period}'].iloc[-1]
-            
+            bb_upper = get_indicator(f'{bb_col}_upper', ['bollinger_bands_upper', 'bb_upper'])
+            bb_middle = get_indicator(f'{bb_col}_middle', ['bollinger_bands_middle', 'bb_middle'])
+            bb_lower = get_indicator(f'{bb_col}_lower', ['bollinger_bands_lower', 'bb_lower'])
+
+            # Volume - try multiple naming conventions
+            rel_volume = get_indicator(f'relative_volume_{self.volume_period}', ['relative_volume', 'rel_volume'], 1.0)
+
             # Volatility
-            atr = data['atr_14'].iloc[-1]
-            
-            # Check for NaN
+            atr = get_indicator('atr_14', ['atr'])
+
+            # Check for NaN in essential indicators
             if pd.isna(fast_ma) or pd.isna(slow_ma) or pd.isna(trend_ma):
                 return 'HOLD'
-            if pd.isna(rsi) or pd.isna(bb_lower) or pd.isna(rel_volume):
+            if pd.isna(rsi) or pd.isna(bb_lower):
                 return 'HOLD'
-            
+
+            # Use default for relative volume if not available
+            if pd.isna(rel_volume):
+                rel_volume = 1.0
+
         except (KeyError, IndexError):
             return 'HOLD'
         
@@ -159,7 +197,17 @@ class Strategy(StrategyBase):
         # MARKET REGIME FILTER
         # ===================================
         bull_market = self._check_market_regime(spy_data)
-        
+
+        # ===================================
+        # STOP-LOSS CHECK (check first if in position)
+        # ===================================
+        if self._in_position[symbol]:
+            entry_price = self._entry_prices[symbol]
+            if entry_price is not None and price < entry_price * (1 - self.stop_loss_pct):
+                self._in_position[symbol] = False
+                self._entry_prices[symbol] = None
+                return 'SELL'
+
         # ===================================
         # SIGNAL COMPONENTS
         # ===================================
@@ -216,7 +264,9 @@ class Strategy(StrategyBase):
             buy_reasons.append("bull_market")
         
         # Need at least 3 signals to buy
-        if buy_signals >= 3 and rsi_not_overbought:
+        if buy_signals >= 3 and rsi_not_overbought and not self._in_position[symbol]:
+            self._in_position[symbol] = True
+            self._entry_prices[symbol] = price
             return 'BUY'
         
         # ===================================
@@ -250,9 +300,11 @@ class Strategy(StrategyBase):
             sell_reasons.append("bear_market")
         
         # Need at least 3 signals to sell
-        if sell_signals >= 3 and rsi_not_oversold:
+        if sell_signals >= 3 and rsi_not_oversold and self._in_position[symbol]:
+            self._in_position[symbol] = False
+            self._entry_prices[symbol] = None
             return 'SELL'
-        
+
         return 'HOLD'
     
     def get_config(self):
@@ -269,6 +321,7 @@ class Strategy(StrategyBase):
             'bb_std': self.bb_std,
             'volume_period': self.volume_period,
             'min_relative_volume': self.min_relative_volume,
-            'spy_ma': self.spy_ma
+            'spy_ma': self.spy_ma,
+            'stop_loss_pct': self.stop_loss_pct
         })
         return base_config

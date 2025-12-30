@@ -25,23 +25,43 @@ class Strategy(StrategyBase):
                 color="#FF6B6B",
                 initial_capital=100000,
                 position_size_pct=0.10,
-                max_positions=10
+                max_positions=10,
+                # Stop-loss widened to 10% to account for:
+                # - 0.1% entry slippage (effectively 9.9% from true entry)
+                # - Intraday volatility and gap risk
+                # - Allow trades room to breathe before triggering stops
+                stop_loss_pct=0.10  # 10% stop-loss
             )
-        
+
         super().__init__(config)
+
+        # Stop-loss widened to 10% to account for:
+        # - 0.1% entry slippage (effectively 9.9% from true entry)
+        # - Intraday volatility and gap risk
+        # - Allow trades room to breathe before triggering stops
+        self.stop_loss_pct = self.config.stop_loss_pct if self.config.stop_loss_pct else 0.10
         
         # Strategy parameters
         self.min_bars_after_cross = 1  # Minimum bars after crossover before signal
-        
+        self.atr_period = 14  # ATR period for volatility measurement
+        self.cooldown_bars = 24  # 24-hour cooldown between signals (replaces one-signal-per-cross)
+
         # This strategy uses cumulative returns and slope calculations
         # We don't pre-compute these as they're simple operations
-        self.required_indicators = []
-        
+        # Note: 'atr' loads from indicator_atr.py (Numba JIT optimized)
+        self.required_indicators = [
+            'atr'  # Used for volatility-adjusted position sizing
+        ]
+
         # State tracking (per symbol)
         # Note: This is OK because we're tracking historical events
         self._last_cross_index = {}
         self._last_cross_was_below = {}
-        self._last_signal_index = {}  # Track when we last emitted a signal
+        self._last_signal_bar = {}  # Track bar index when we last emitted a signal (for cooldown)
+
+        # Track entry prices and positions for stop-loss
+        self._entry_prices = {}
+        self._in_position = {}
     
     def generate_signal(self, symbol, data, spy_data, bar_index):
         """
@@ -64,9 +84,24 @@ class Strategy(StrategyBase):
         if symbol not in self._last_cross_index:
             self._last_cross_index[symbol] = -1
             self._last_cross_was_below[symbol] = None
-            self._last_signal_index[symbol] = -1
+            self._last_signal_bar[symbol] = -100  # Start with negative to allow first signal
+            self._entry_prices[symbol] = None
+            self._in_position[symbol] = False
         
         try:
+            # Get current price for stop-loss check
+            current_price = data['close'].iloc[-1]
+
+            # ===================================
+            # STOP-LOSS CHECK (check first if in position)
+            # ===================================
+            if self._in_position[symbol]:
+                entry_price = self._entry_prices[symbol]
+                if entry_price is not None and current_price < entry_price * (1 - self.stop_loss_pct):
+                    self._in_position[symbol] = False
+                    self._entry_prices[symbol] = None
+                    return 'SELL'
+
             # Calculate cumulative returns (simple, fast operation)
             stock_returns = data['close'].pct_change().fillna(0)
             spy_returns = spy_data['close'].pct_change().fillna(0)
@@ -113,29 +148,51 @@ class Strategy(StrategyBase):
             # Current position relative to S&P
             currently_below_sp500 = (stock_cum[current_idx] < spy_cum[current_idx])
             
+            # Check cooldown - must wait 24 bars between signals
+            bars_since_last_signal = bar_index - self._last_signal_bar[symbol]
+            cooldown_passed = bars_since_last_signal >= self.cooldown_bars
+
             # ===================================
             # BUY SIGNAL
             # ===================================
             # Stock crossed BELOW S&P, slope reverses from - to +
-            # But only emit signal once per cross (at the signal index or after)
-            if (self._last_cross_was_below[symbol] and
-                self._last_signal_index[symbol] < self._last_cross_index[symbol]):  # Haven't signaled yet for this cross
-                
+            # Use cooldown instead of one-signal-per-cross to allow more trades
+            if (self._last_cross_was_below[symbol] and cooldown_passed and not self._in_position[symbol]):
+
                 if (prev_slope < 0 and curr_slope > 0 and currently_below_sp500):
-                    self._last_signal_index[symbol] = current_idx
+                    self._last_signal_bar[symbol] = bar_index
+                    self._in_position[symbol] = True
+                    self._entry_prices[symbol] = current_price
+
+                    # ATR-based Position Sizing (from indicator_atr.py):
+                    # The ATR value can be used to scale position size inversely
+                    # with volatility. Higher ATR = smaller position, lower ATR = larger position.
+                    #
+                    # Example implementation (for future enhancement):
+                    #   atr = data.get('atr', pd.Series([np.nan] * len(data))).iloc[-1]
+                    #   if not np.isnan(atr) and atr > 0:
+                    #       # Scale position_size by 1/ATR for volatility adjustment
+                    #       # base_position_size * (target_atr / current_atr)
+                    #       volatility_factor = target_atr / atr
+                    #       adjusted_position_size = base_position_size * volatility_factor
+                    #
+                    # This ensures consistent risk across varying market conditions.
+
                     return 'BUY'
-            
+
             # ===================================
             # SELL SIGNAL
             # ===================================
             # Stock crossed ABOVE S&P, slope reverses from + to -
-            # But only emit signal once per cross
+            # Use cooldown for sell signals too
             elif (self._last_cross_was_below[symbol] is not None and
                   not self._last_cross_was_below[symbol] and
-                  self._last_signal_index[symbol] < self._last_cross_index[symbol]):  # Haven't signaled yet for this cross
-                
+                  cooldown_passed and self._in_position[symbol]):
+
                 if (prev_slope > 0 and curr_slope < 0 and not currently_below_sp500):
-                    self._last_signal_index[symbol] = current_idx
+                    self._last_signal_bar[symbol] = bar_index
+                    self._in_position[symbol] = False
+                    self._entry_prices[symbol] = None
                     return 'SELL'
             
         except Exception as e:
@@ -148,6 +205,9 @@ class Strategy(StrategyBase):
         """Return serializable configuration"""
         base_config = super().get_config()
         base_config.update({
-            'min_bars_after_cross': self.min_bars_after_cross
+            'min_bars_after_cross': self.min_bars_after_cross,
+            'stop_loss_pct': self.stop_loss_pct,
+            'atr_period': self.atr_period,
+            'cooldown_bars': self.cooldown_bars
         })
         return base_config

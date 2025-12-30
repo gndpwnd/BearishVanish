@@ -23,16 +23,33 @@ class Strategy(StrategyBase):
                 color="#2E86AB",
                 initial_capital=100000,
                 position_size_pct=0.10,
-                max_positions=10
+                max_positions=10,
+                # Stop-loss widened to 10% to account for:
+                # - 0.1% entry slippage (effectively 9.9% from true entry)
+                # - Intraday volatility and gap risk
+                # - Allow trades room to breathe before triggering stops
+                stop_loss_pct=0.10  # 10% stop-loss
             )
-        
+
         super().__init__(config)
-        
+
+        # Stop-loss widened to 10% to account for:
+        # - 0.1% entry slippage (effectively 9.9% from true entry)
+        # - Intraday volatility and gap risk
+        # - Allow trades room to breathe before triggering stops
+        self.stop_loss_pct = self.config.stop_loss_pct if self.config.stop_loss_pct else 0.10
+
+        # Cooldown period (replaces one-signal-per-cross restriction)
+        self.cooldown_bars = 24  # 24-hour cooldown between signals
+
         # State tracking (per symbol)
         self._last_cross_index = {}
         self._last_cross_was_below = {}
-        self._last_signal_index = {}
-        self._signal_count = {}
+        self._last_signal_bar = {}  # Track bar index for cooldown
+
+        # Track entry prices and positions for stop-loss
+        self._entry_prices = {}
+        self._in_position = {}
     
     def generate_signal(self, symbol, data, spy_data, bar_index):
         """
@@ -55,10 +72,24 @@ class Strategy(StrategyBase):
         if symbol not in self._last_cross_index:
             self._last_cross_index[symbol] = -1
             self._last_cross_was_below[symbol] = None
-            self._last_signal_index[symbol] = -1
-            self._signal_count[symbol] = {'buy': 0, 'sell': 0}
+            self._last_signal_bar[symbol] = -100  # Start negative to allow first signal
+            self._entry_prices[symbol] = None
+            self._in_position[symbol] = False
         
         try:
+            # Get current price for stop-loss check
+            current_price = data['close'].iloc[-1]
+
+            # ===================================
+            # STOP-LOSS CHECK (check first if in position)
+            # ===================================
+            if self._in_position[symbol]:
+                entry_price = self._entry_prices[symbol]
+                if entry_price is not None and current_price < entry_price * (1 - self.stop_loss_pct):
+                    self._in_position[symbol] = False
+                    self._entry_prices[symbol] = None
+                    return 'SELL'
+
             # Calculate cumulative returns
             stock_returns = data['close'].pct_change().fillna(0)
             spy_returns = spy_data['close'].pct_change().fillna(0)
@@ -83,41 +114,47 @@ class Strategy(StrategyBase):
             if current_idx >= 1:
                 prev_diff = stock_cum[current_idx - 1] - spy_cum[current_idx - 1]
                 curr_diff = stock_cum[current_idx] - spy_cum[current_idx]
-                
+
                 # Crossover detected (sign change)
                 if prev_diff * curr_diff < 0:
                     self._last_cross_index[symbol] = current_idx
                     self._last_cross_was_below[symbol] = (curr_diff < 0)
-                    # Reset signal counter on new cross
-                    self._last_signal_index[symbol] = -1
-            
+
             # No crossover yet
             if self._last_cross_index[symbol] == -1:
                 return 'HOLD'
-            
+
             # Get slope values
             prev_slope = stock_slope[current_idx - 1]
             curr_slope = stock_slope[current_idx]
-            
+
             # Current position relative to S&P
             currently_below = (stock_cum[current_idx] < spy_cum[current_idx])
             currently_above = (stock_cum[current_idx] > spy_cum[current_idx])
-            
+
+            # Check cooldown - must wait 24 bars between signals
+            bars_since_last_signal = bar_index - self._last_signal_bar[symbol]
+            cooldown_passed = bars_since_last_signal >= self.cooldown_bars
+
             # BUY: Stock crossed BELOW S&P, slope reverses from - to +
-            if (self._last_cross_was_below[symbol] and
-                self._last_signal_index[symbol] <= self._last_cross_index[symbol]):
-                
+            # Use cooldown instead of one-signal-per-cross to allow more trades
+            if (self._last_cross_was_below[symbol] and cooldown_passed and not self._in_position[symbol]):
+
                 if (prev_slope < 0 and curr_slope > 0 and currently_below):
-                    self._last_signal_index[symbol] = current_idx
+                    self._last_signal_bar[symbol] = bar_index
+                    self._in_position[symbol] = True
+                    self._entry_prices[symbol] = current_price
                     return 'BUY'
-            
+
             # SELL: Stock crossed ABOVE S&P, slope reverses from + to -
             elif (self._last_cross_was_below[symbol] is not None and
                   not self._last_cross_was_below[symbol] and
-                  self._last_signal_index[symbol] <= self._last_cross_index[symbol]):
-                
+                  cooldown_passed and self._in_position[symbol]):
+
                 if (prev_slope > 0 and curr_slope < 0 and currently_above):
-                    self._last_signal_index[symbol] = current_idx
+                    self._last_signal_bar[symbol] = bar_index
+                    self._in_position[symbol] = False
+                    self._entry_prices[symbol] = None
                     return 'SELL'
         
         except Exception:
@@ -127,4 +164,9 @@ class Strategy(StrategyBase):
     
     def get_config(self):
         """Return serializable configuration"""
-        return super().get_config()
+        base_config = super().get_config()
+        base_config.update({
+            'stop_loss_pct': self.stop_loss_pct,
+            'cooldown_bars': self.cooldown_bars
+        })
+        return base_config

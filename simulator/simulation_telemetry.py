@@ -662,12 +662,15 @@ class SimulationTelemetry:
         
         if len(returns) > 2:
             returns_arr = np.array(returns)
+            # Using 252 trading days/year for daily bar data
+            # For intraday data, multiply by bars_per_day
+            TRADING_DAYS_PER_YEAR = 252
             if returns_arr.std() > 0:
-                sharpe_ratio = (returns_arr.mean() / returns_arr.std()) * np.sqrt(252 * 6.5)
-            
+                sharpe_ratio = (returns_arr.mean() / returns_arr.std()) * np.sqrt(TRADING_DAYS_PER_YEAR)
+
             downside_returns = returns_arr[returns_arr < 0]
             if len(downside_returns) > 0 and downside_returns.std() > 0:
-                sortino_ratio = (returns_arr.mean() / downside_returns.std()) * np.sqrt(252 * 6.5)
+                sortino_ratio = (returns_arr.mean() / downside_returns.std()) * np.sqrt(TRADING_DAYS_PER_YEAR)
         
         # Calculate max drawdown from portfolio values
         cursor.execute('''
