@@ -1,1 +1,0 @@
-ssh nelsg10@vegaln1.erau.edu
